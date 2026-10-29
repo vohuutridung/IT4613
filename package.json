@@ -1,0 +1,35 @@
+{
+  "name": "the-daily",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "prepare:data": "python3 scripts/prepare_demo_data.py",
+    "predev": "npm run prepare:data",
+    "dev": "vite --host 127.0.0.1",
+    "prebuild": "npm run prepare:data",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "format": "prettier --write src tests index.html package.json tsconfig.json vite.config.ts",
+    "pretest": "npm run prepare:data",
+    "test": "python3 -m unittest discover -s scripts -p 'test_*.py' && node --import tsx --test tests/*.test.ts",
+    "check:data": "python3 scripts/prepare_demo_data.py --check"
+  },
+  "dependencies": {
+    "lucide-react": "1.64.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router-dom": "7.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "prettier": "3.9.10",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
+  }
+}
