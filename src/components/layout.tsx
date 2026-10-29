@@ -1,11 +1,4 @@
-import {
-  ArrowDown,
-  ArrowUpRight,
-  Check,
-  ChevronDown,
-  Menu,
-  X,
-} from "lucide-react";
+import { ArrowDown, ArrowUpRight, ChevronDown, Menu, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { useReader } from "../app/readerState";
@@ -42,7 +35,6 @@ export function SiteHeader() {
         >
           <Wordmark small />
         </Link>
-        <span className="header-tagline">A more personal way to read.</span>
         <nav className="desktop-nav" aria-label="Main navigation">
           <NavLink to="/for-you">For You</NavLink>
           <NavLink to="/history">Reading History</NavLink>
@@ -51,16 +43,7 @@ export function SiteHeader() {
           <span className="reader-monogram">
             {selectedId ? selectedId.slice(-2) : "D."}
           </span>
-          <span>
-            {selectedId ? (
-              <>
-                <small>YOUR EDITION</small>
-                {selectedId}
-              </>
-            ) : (
-              "Choose a reader"
-            )}
-          </span>
+          <span>{selectedId || "Choose a reader"}</span>
           <ChevronDown size={14} />
         </Link>
         <button
@@ -108,11 +91,6 @@ export function SiteFooter() {
         >
           <Wordmark small />
         </Link>
-        <p>A more personal way to read.</p>
-      </div>
-      <div className="footer-note">
-        <span>Good stories. A little perspective.</span>
-        <span>An edition from the archive.</span>
       </div>
       <button
         className="text-link footer-top"
@@ -129,25 +107,4 @@ export function SiteFooter() {
       </button>
     </footer>
   );
-}
-
-export function EditionMark({
-  label = "THE PERSONAL EDITION",
-}: {
-  label?: string;
-}) {
-  return (
-    <span className="edition-mark">
-      <span className="tiny-diamond" />
-      {label}
-    </span>
-  );
-}
-
-export function ProfileSelected({ selected }: { selected: boolean }) {
-  return selected ? (
-    <span className="selected-label">
-      <Check size={13} /> YOUR CURRENT READER
-    </span>
-  ) : null;
 }

@@ -1,4 +1,4 @@
-import { ArrowRight, ArrowUpRight, Clock3 } from "lucide-react";
+import { ArrowRight, ArrowUpRight } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import {
   categoryLabel,
@@ -31,14 +31,6 @@ export function CategoryLabel({
   );
 }
 
-export function ReadingTime({ minutes }: { minutes: number }) {
-  return (
-    <span className="reading-time">
-      <Clock3 size={12} aria-hidden="true" /> Est. {minutes} min read
-    </span>
-  );
-}
-
 export function ArticleLink({
   article,
   children,
@@ -63,10 +55,6 @@ export function ArticleLink({
 export function FeaturedStory({ article }: { article: NewsPreview }) {
   return (
     <article className="featured-story">
-      <div className="featured-topline">
-        <span className="eyebrow">THE LEAD STORY</span>
-        <span className="feature-number">01</span>
-      </div>
       <CategoryLabel article={article} />
       <h2>
         <ArticleLink article={article}>{article.headline}</ArticleLink>
@@ -76,7 +64,6 @@ export function FeaturedStory({ article }: { article: NewsPreview }) {
         <ArticleLink article={article} className="text-link accent-link">
           Read the story <ArrowUpRight size={17} />
         </ArticleLink>
-        <ReadingTime minutes={article.estimatedReadingMinutes} />
       </div>
       <span className="feature-flourish" aria-hidden="true">
         D.
@@ -103,7 +90,6 @@ export function StoryCard({
       </h2>
       <p>{article.excerpt}</p>
       <div className="story-card-bottom">
-        <ReadingTime minutes={article.estimatedReadingMinutes} />
         <ArticleLink article={article} className="story-arrow">
           <span className="sr-only">Read {article.headline}</span>
           <ArrowUpRight size={19} />
@@ -129,7 +115,6 @@ export function StoryRow({
           <ArticleLink article={article}>{article.headline}</ArticleLink>
         </h2>
         <p>{article.excerpt}</p>
-        <ReadingTime minutes={article.estimatedReadingMinutes} />
       </div>
       <ArticleLink article={article} className="story-arrow">
         <span className="sr-only">Read {article.headline}</span>

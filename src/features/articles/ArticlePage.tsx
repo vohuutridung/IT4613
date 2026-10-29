@@ -4,11 +4,9 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useReader } from "../../app/readerState";
 import {
   CategoryLabel,
-  ReadingTime,
   SectionHeading,
   StoryCard,
 } from "../../components/editorial";
-import { EditionMark } from "../../components/layout";
 import { ErrorState, LoadingState, NotFound } from "../../components/states";
 import { useResource } from "../../hooks/useResource";
 import { formatParagraphs } from "../../lib/paragraphs";
@@ -77,10 +75,6 @@ export function ArticlePage() {
   if (!article.data) return <NotFound article />;
   const story = article.data;
   const paragraphs = formatParagraphs(story.body);
-  const preview = news[newsId];
-  const minutes =
-    preview?.estimatedReadingMinutes ??
-    Math.max(1, Math.ceil(story.body.split(/\s+/).length / 220));
   const continued = (ranked.data ?? [])
     .filter((item) => item.newsId !== newsId)
     .slice(0, 2)
@@ -108,16 +102,11 @@ export function ArticlePage() {
             <ArrowLeft size={16} /> Back to your edition
           </Link>
         )}
-        <EditionMark label="TAKE A MOMENT. READ A STORY." />
       </div>
       <article className="article-content" ref={contentRef}>
         <header className="article-header">
           <CategoryLabel article={story} />
           <h1>{story.headline}</h1>
-          <div className="article-byline">
-            <span>THE DAILY. / FROM THE ARCHIVE</span>
-            <ReadingTime minutes={minutes} />
-          </div>
         </header>
         <div className="article-body">
           {paragraphs.map((paragraph, index) => (
@@ -130,7 +119,6 @@ export function ArticlePage() {
           <span className="tiny-diamond" />
         </div>
         <div className="article-closing">
-          <span>Thanks for making time for a good read.</span>
           <Link to="/for-you" className="text-link">
             Your edition <ArrowRight size={15} />
           </Link>
