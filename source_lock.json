@@ -1,0 +1,111 @@
+{
+  "target": {
+    "repository": "https://github.com/chenghuige/mind.git",
+    "commit": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
+    "reference_chain": [
+      "projects/ai/mind/src/train/v17/body.sh",
+      "projects/ai/mind/src/train/v17/base.sh",
+      "projects/ai/mind/src/train/v17/common.sh"
+    ],
+    "checkout_status": "PINNED_GIT_CHECKOUT_VERIFIED",
+    "checkout_path": "upstream-mind",
+    "archive_path": null,
+    "archive_sha256": null,
+    "provenance_path": "source_provenance.json",
+    "provenance_status": "GIT_CHECKOUT_PROVENANCE_RECORDED_NO_ARCHIVE_CLAIM",
+    "verified_head": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
+    "source_checksums": "source_manifest.json",
+    "retrieval_manifest": "source_manifest.json"
+  },
+  "references": {
+    "technical_report": "https://msnews.github.io/assets/doc/1.pdf",
+    "dataset_documentation": "https://github.com/msnews/msnews.github.io",
+    "microsoft_dataset_schema": "https://learn.microsoft.com/en-us/azure/open-datasets/dataset-microsoft-news"
+  },
+  "local_control_document": {
+    "path": "SOP_MIND_Phan_01_02.md",
+    "sha256": "495d2fc966101ef9a13dc888aa2a625c8ef65b132a4ebbf290261cd37f2bd29c"
+  },
+  "runtime_observed": {
+    "python": "3.11.15",
+    "operating_system": "Ubuntu 24.04.4 LTS, Linux x86_64",
+    "kernel": "7.0.0-38-generic",
+    "numpy": "2.4.6",
+    "transformers": "5.20.2",
+    "torch": "2.9.1+cpu",
+    "tensorflow": null,
+    "gezi": "not installed / not in locked repo",
+    "melt": "not installed / not in locked repo",
+    "husky": "not installed / not in locked repo",
+    "psutil": null,
+    "tokenizer_cache_bert_base_cased": false
+  },
+  "tensorflow_compatibility_check": {
+    "environment_platform_is_supported_by_current_official_wheels": true,
+    "note": "Current official TensorFlow installation docs list Python 3.11 and Linux x86_64/Ubuntu as supported. This does not establish compatibility of the pinned source/dependency APIs or identify the required TensorFlow version; no TensorFlow was installed.",
+    "required_source_version": "UNRESOLVED: README.md:8 says TF 1.14+ and TF 2.1+; no exact runtime pin/dependency lock is supplied."
+  },
+  "dependency_classification": {
+    "tensorflow_runtime": "INSTALLABLE IN PRINCIPLE; exact compatible version UNRESOLVED; not installed",
+    "gezi_melt": "required internal symbols are not included in this repository checkout and are absent from environment; blocks exact execution",
+    "husky": "README says private training loop uses it; not required by inspected stage 01\u201302 source imports so far; exact runtime role UNRESOLVED",
+    "vocabularies_and_doc_lookups": "reproducible pipeline outputs; not required as preprovided inputs; exact gezi.Vocab/pad behavior is BLOCKED",
+    "body_corpus": "source pipeline requires body source msn.json; absent; cur_body and his_body BLOCKED",
+    "original_glove_embedding": "../input/glove-100/emb.npy absent; word initialization branch BLOCKED",
+    "entity_embedding": "entity_embedding.vec exists by split (manifest); exact entity_emb2 construction is described in source notebook; not generated because vocab/mapping and gezi semantics not executable/fully proved",
+    "encoder_checkpoint": "not needed for fresh initialized forward; required only for learned weight parity"
+  },
+  "artifacts_observed": {
+    "mind_body_msn_json": false,
+    "original_glove_100_embedding": false,
+    "entity_embedding_vec_by_split": true,
+    "entity_emb2_npy": false,
+    "original_vocabularies": false,
+    "original_doc4_lookups": false,
+    "original_start_times_txt": false,
+    "trained_encoder_checkpoint": false,
+    "bert_base_cased_tokenizer_candidate": true,
+    "official_mind_crawler_source": true
+  },
+  "status": "SOURCE_VERIFIED_IMPLEMENTATION_BLOCKED",
+  "notes": [
+    "Official Git clone and detached checkout were used; HEAD and tree object were verified. This is not an archive and no archive checksum is claimed.",
+    "The pinned source repository itself states in README.md that private gezi/melt/husky training utilities are not open-sourced and that the code cannot run without them.",
+    "Source files, notebooks, exact lines, and the 332-file SHA-256 manifest are in upstream-mind/ and source_manifest.json.",
+    "No source implementation artifact or field vector has been generated. No approximation was substituted.",
+    "Tokenizer candidate is official and pinned but is not proven to match /home/gezi/data/lm/bert-base-cased; it is not wired into preprocessing.",
+    "Official MIND body crawler code was found; body corpus remains absent, and official docs report expired URLs. Crawler was not run.",
+    "Selected public utility primitives were runtime checked in an isolated compatibility environment; this does not resolve MIND exact dependency version or produce MIND field vectors. See dependency_research.md and compat_environment.json.",
+    "The interrupted opencv-python-headless install was not resumed; read-only inspection confirmed 4.7.0.72 was already installed and importable. No further package installs were made."
+  ],
+  "source_access_diagnostics": {
+    "execution_context": "Tool sandbox process observed as codex/user.slice with read-only root filesystem; no separate project-host terminal exposed.",
+    "sandbox_dns": "system resolver configured via 127.0.0.53; getent returned no GitHub addresses; no standard proxy env vars; shell calls failed at DNS before TLS/HTTP.",
+    "network_permission": "Official sandbox escalation mechanism was used for git clone and succeeded; no TLS verification was disabled.",
+    "tls_timeout_http_auth": "Not reached by initial sandbox attempts; successful authorized git transport confirms official public repository was readable.",
+    "uv_cache": "Initial default cache was read-only; UV_CACHE_DIR=/tmp/uv-cache-mind made uv tree --locked --depth 1 succeed.",
+    "source_identity": "HEAD f632bdf7b1136dff142835f9fe69c8ce5f8c166d; tree 70632beb34df453ab38c5e20fc94e59664a90589; working tree clean."
+  },
+  "dependency_research": {
+    "status": "PARTIAL_PUBLIC_SOURCE_FOUND_EXACT_MIND_DEPENDENCY_LINK_UNRESOLVED",
+    "report": "dependency_research.md",
+    "source_manifest": "dependency_source_lock.json",
+    "tokenizer_asset_manifest": "tokenizer_artifact.json",
+    "tokenizer_runtime_check": "artifacts/tokenizers/tokenizer_check_report.json",
+    "public_repositories": {
+      "wenzheng": "d57fd68610de0a07e94cc9050ff7bc44f5988d0f",
+      "gezi": "4fc8f9a3c5837e8add720bf6954a4f52abfff8b5",
+      "melt": "d2646ffe84eabab464b4bef6b31d218abdbf6ce5",
+      "msnews_mind_crawler": "47fb9852c97814d80ccf9c658d6b81f5c930b510"
+    },
+    "python37_environment_attempt": "RESOLVED_FOR_ISOLATED_CHECKS: Python 3.7.6 + TensorFlow 1.14.0 + protobuf 3.20.3; not a historical MIND pin",
+    "field_forward": "NOT RUN: exact MIND Vocab/lookup/embedding/wrapper/DIN/record APIs not recovered",
+    "compatibility_environment": "compat_environment.json",
+    "runtime_checks": "artifacts/melt_runtime_check.json",
+    "history_search": "BOUNDED_PUBLIC_HISTORY_SEARCHED_AFTER_FETCHING_MISSING_OBJECTS; no exact Python implementation confirmed; see dependency_research.md and dependency_source_lock.json",
+    "package_import_state": {
+      "gezi": "IMPORT_OK; no Vocab export",
+      "melt": "BLOCKED_MISSING_OFFICIAL"
+    }
+  }
+}

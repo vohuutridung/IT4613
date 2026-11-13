@@ -1,0 +1,7 @@
+# Isolated, CPU-compatible runtime used for this reimplementation check.
+# This is not the historical TensorFlow 1.14 environment.
+tensorflow-cpu==2.15.1
+numpy==1.26.4
+scipy==1.17.1
+scikit-learn==1.4.2
+transformers==5.20.2
