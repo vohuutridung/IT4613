@@ -41,9 +41,9 @@ def checkpoint_digest(prefix):
 
 def load_run(run_dir, db_path=DEFAULT_DB):
     run_dir = Path(run_dir)
-    db_path = Path(db_path).expanduser().resolve(strict=True)
+    requested_db_path = Path(db_path).expanduser()
     config = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
-    current_identity = locked_artifacts(db_path)
+    current_identity = locked_artifacts(requested_db_path)
     current_inputs = current_identity["fingerprint"]
     if config.get("config", {}).get("inputs") != current_inputs:
         raise ValueError("checkpoint input DB/mapping/artifact fingerprint differs from current files")
@@ -55,6 +55,7 @@ def load_run(run_dir, db_path=DEFAULT_DB):
             continue
         if config.get("config", {}).get(key) != value:
             raise ValueError("checkpoint model/protocol contract differs at {}".format(key))
+    db_path = requested_db_path.resolve(strict=True)
     model, store, word_manifest = make_model(db_path)
     if Path(store.db_path).resolve(strict=True) != db_path:
         raise ValueError("inference loader opened a different database than the fingerprinted DB")

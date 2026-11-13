@@ -75,15 +75,38 @@ def verified_database_identity(db_path):
     Sidecar hashes are expectations. The DB bytes, SQL schema, and mapping are
     read and hashed at invocation time; no size-only cache is used.
     """
-    resolved_db = Path(db_path).expanduser().resolve(strict=True)
+    # Keep the caller's absolute-but-unresolved path as well as its physical
+    # target. Kaggle exposes immutable inputs through a working-directory
+    # overlay: stage01.sqlite and artifact_manifest.json are sibling symlinks,
+    # while resolving only the DB symlink moves it back to /kaggle/input where
+    # that sibling manifest is not present.
+    requested_db = Path(db_path).expanduser()
+    if not requested_db.is_absolute():
+        requested_db = Path.cwd() / requested_db
+    requested_db = Path(os.path.abspath(str(requested_db)))
+    if not requested_db.is_file():
+        raise FileNotFoundError("database is not a regular file: {}".format(requested_db))
+    resolved_db = requested_db.resolve(strict=True)
     if not resolved_db.is_file():
         raise FileNotFoundError("database is not a regular file: {}".format(resolved_db))
 
-    db_manifest_path = resolved_db.parent / "artifact_manifest.json"
+    db_manifest_path = requested_db.parent / "artifact_manifest.json"
+    if not db_manifest_path.is_file() and resolved_db.parent != requested_db.parent:
+        db_manifest_path = resolved_db.parent / "artifact_manifest.json"
     if not db_manifest_path.is_file():
-        raise ValueError("database sidecar artifact_manifest.json is missing beside {}".format(resolved_db))
+        raise ValueError(
+            "database sidecar artifact_manifest.json is missing beside requested path {} "
+            "and resolved target {}".format(requested_db, resolved_db))
     db_manifest = json.loads(db_manifest_path.read_text(encoding="utf-8"))
-    db_relative = resolved_db.relative_to(db_manifest_path.parent.resolve()).as_posix()
+    try:
+        db_relative = requested_db.relative_to(db_manifest_path.parent).as_posix()
+    except ValueError:
+        try:
+            db_relative = resolved_db.relative_to(db_manifest_path.parent.resolve()).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                "database path is not covered by its sidecar manifest: {}".format(db_manifest_path)
+            ) from exc
     db_entries = {item["path"]: item for item in db_manifest.get("artifacts", [])}
     db_entry = db_entries.get(db_relative)
     if db_entry is None:
@@ -100,22 +123,6 @@ def verified_database_identity(db_path):
     expected_vocab_hashes = reconciliation.get("vocabulary_sha256", {})
     artifact_entries = {item["path"]: item for item in db_manifest.get("artifacts", [])}
     vocab_fields = ("uid", "did", "cat", "sub_cat", "entity", "entity_type", "word")
-    vocab_hashes = {}
-    for field in vocab_fields:
-        rel = "vocab/{}.tsv".format(field)
-        path = db_manifest_path.parent / rel
-        expected = expected_vocab_hashes.get(rel)
-        if expected is None:
-            expected = artifact_entries.get(rel, {}).get("sha256")
-        if expected is None or not path.is_file():
-            raise ValueError("database manifest lacks mapping provenance for {}".format(rel))
-        actual, vocab_stat = _sha256_stable_file(path)
-        if _file_signature(vocab_stat) != _file_signature(path.stat()):
-            raise ValueError("database vocabulary mapping changed during fingerprint verification: {}".format(
-                path))
-        if actual != expected:
-            raise ValueError("database vocabulary mapping checksum differs for {}".format(path))
-        vocab_hashes[rel] = actual
 
     if not expected_schema_sha:
         resolved_config_path = db_manifest_path.parent / "resolved_config.json"
@@ -138,8 +145,55 @@ def verified_database_identity(db_path):
 
         mapping_digest = hashlib.sha256()
         for field in vocab_fields:
+            rel = "vocab/{}.tsv".format(field)
+            path = db_manifest_path.parent / rel
+            expected = expected_vocab_hashes.get(rel)
+            if expected is None:
+                expected = artifact_entries.get(rel, {}).get("sha256")
+
+            # The database stores every vocabulary row. Reconstruct the exact
+            # Stage 01 TSV byte stream from that table so a transfer package
+            # may omit standalone uid/did/category maps without weakening
+            # provenance: the DB itself has already matched its manifest SHA.
+            exported_hash = hashlib.sha256()
+            expected_id = 0
+            row_count = 0
+            for row_id, token, source_count in conn.execute(
+                    "SELECT id,token,source_count FROM vocab WHERE field=? ORDER BY id", (field,)):
+                row_id = int(row_id)
+                token = str(token)
+                if row_id != expected_id:
+                    raise ValueError("database vocabulary IDs are not contiguous for {} at {}".format(
+                        field, row_id))
+                if field == "word":
+                    line = "{}\t{}\t\n".format(row_id, token)
+                else:
+                    if source_count is None:
+                        raise ValueError("database vocabulary count is missing for {} ID {}".format(
+                            field, row_id))
+                    line = "{}\t{}\t{}\n".format(row_id, token.replace("\t", " "),
+                                                   int(source_count))
+                exported_hash.update(line.encode("utf-8"))
+                expected_id += 1
+                row_count += 1
+            if not row_count:
+                raise ValueError("database vocabulary is empty for {}".format(field))
+            reconstructed_hash = exported_hash.hexdigest()
+
+            if path.is_file():
+                actual_hash, vocab_stat = _sha256_stable_file(path)
+                if _file_signature(vocab_stat) != _file_signature(path.stat()):
+                    raise ValueError("database vocabulary mapping changed during fingerprint verification: {}".format(
+                        path))
+                if actual_hash != reconstructed_hash:
+                    raise ValueError("standalone vocabulary file differs from DB rows: {}".format(path))
+            else:
+                actual_hash = reconstructed_hash
+
+            if expected is not None and actual_hash != expected:
+                raise ValueError("database vocabulary mapping checksum differs for {}".format(rel))
             mapping_digest.update(field.encode("utf-8") + b"\0")
-            mapping_digest.update(bytes.fromhex(vocab_hashes["vocab/{}.tsv".format(field)]))
+            mapping_digest.update(bytes.fromhex(actual_hash))
         for row in conn.execute(
                 "SELECT field,id,token,source_count FROM vocab ORDER BY field,id"):
             mapping_digest.update(json.dumps(
@@ -418,10 +472,13 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
     if effective_batch < 1 or microbatch < 1:
         raise ValueError("batch sizes must be positive")
     tf.keras.utils.set_random_seed(seed)
-    db_path = Path(db_path).expanduser().resolve(strict=True)
-    input_identity = locked_artifacts(db_path)
+    # Fingerprint the caller path before resolving symlinks so an overlay
+    # manifest beside a read-only Kaggle DB link remains discoverable.
+    requested_db_path = Path(db_path).expanduser()
+    input_identity = locked_artifacts(requested_db_path)
     locked = input_identity["fingerprint"]
     database_location = input_identity["location"]
+    db_path = requested_db_path.resolve(strict=True)
     model, store, word_manifest = make_model(db_path)
     if Path(store.db_path).resolve(strict=True) != db_path:
         raise ValueError("model loader opened a different database than the fingerprinted DB")

@@ -92,16 +92,17 @@ def _behavior_dids(behaviors_path, did_mapping):
 def build(db_path=DEFAULT_DB, train_behaviors_path=None, out_path=None):
     if train_behaviors_path is None:
         raise ValueError("--train-behaviors must point to the original train/behaviors.tsv")
-    db_path = Path(db_path).expanduser().resolve(strict=True)
+    requested_db_path = Path(db_path).expanduser()
     train_behaviors_path = Path(train_behaviors_path).expanduser().resolve(strict=True)
     out_path = Path(out_path or ROOT / "artifacts/recommendation_runs/train_did_membership.npy")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(str(out_path) + ".manifest.json")
 
     started = time.time()
-    verified_database = _database_identity(db_path)
+    verified_database = _database_identity(requested_db_path)
     database_identity = verified_database["fingerprint"]
     database_location = verified_database["location"]
+    db_path = requested_db_path.resolve(strict=True)
     behaviors_sha = sha256_file(train_behaviors_path)
     did_mapping, mapping_sha = _load_did_mapping(db_path)
     if mapping_sha != database_identity["did_mapping_sha256"]:
