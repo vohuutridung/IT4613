@@ -1,0 +1,239 @@
+{
+  "status": "EXACT_2021_DEPENDENCY_LINK_UNRESOLVED",
+  "repos": {
+    "wenzheng": {
+      "url": "https://github.com/chenghuige/wenzheng.git",
+      "commit": "d57fd68610de0a07e94cc9050ff7bc44f5988d0f",
+      "commit_date": "2019-08-07T19:12:27+08:00",
+      "note": "README MIND says old melt code can be found in wenzheng/utils; no exact dependency SHA linkage or submodule pin exists in MIND."
+    },
+    "gezi": {
+      "url": "https://github.com/chenghuige/gezi.git",
+      "commit": "4fc8f9a3c5837e8add720bf6954a4f52abfff8b5",
+      "commit_date": "2016-11-08T23:34:07+08:00",
+      "note": "Separate official repo HEAD; old C++/wrapper source, not evidence of MIND 2021 package version."
+    },
+    "melt": {
+      "url": "https://github.com/chenghuige/melt.git",
+      "commit": "d2646ffe84eabab464b4bef6b31d218abdbf6ce5",
+      "commit_date": "2017-08-26T12:30:13+08:00",
+      "note": "Separate official repo HEAD; not evidence of MIND 2021 TensorFlow utility implementation."
+    },
+    "msnews_mind_crawler": {
+      "url": "https://github.com/msnews/MIND.git",
+      "commit": "47fb9852c97814d80ccf9c658d6b81f5c930b510",
+      "commit_date": "2020-07-30T13:22:46+08:00",
+      "note": "Official dataset crawler source; only code inspected, not executed."
+    }
+  },
+  "inspected_files": [
+    {
+      "repository_dir": "upstream-wenzheng",
+      "path": "utils/gezi/word_counter.py",
+      "git_blob": "4786bb4fcbaca976692464aa15a95f3b2a2332c2",
+      "bytes": 1896,
+      "sha256": "a9576129f31d439eb982e9e2d5b5817b15c438c4b22cb5c69fbd5f36a8b63934",
+      "last_change_commit": "025d5298dbf6c74ae5857613e4e0c402a7344004"
+    },
+    {
+      "repository_dir": "upstream-wenzheng",
+      "path": "utils/gezi/util.py",
+      "git_blob": "0fdd68a6f4d85ff3e8da8e150921d2ae61997727",
+      "bytes": 17782,
+      "sha256": "d9c60a06f72c3f25a37bf99c1ec84501af9c567bbf4119935d6fe6821683709b",
+      "last_change_commit": "d57fd68610de0a07e94cc9050ff7bc44f5988d0f"
+    },
+    {
+      "repository_dir": "upstream-wenzheng",
+      "path": "utils/gezi/vocabulary.py",
+      "git_blob": "667530c6bcdc740528b8813f839c834bfd58fd3a",
+      "bytes": 7310,
+      "sha256": "8a343f544f783b58c1d261e86ead2d0c3ecf38e8bfe69d2a0499daa644345735",
+      "last_change_commit": "96c6774a232ebb1113a3d2f395bd929f97b7fccf"
+    },
+    {
+      "repository_dir": "upstream-wenzheng",
+      "path": "utils/melt/ops/ops.py",
+      "git_blob": "9ee8caedf710d985d39bee2ab7d0b18b358fea58",
+      "bytes": 42664,
+      "sha256": "b0428dd2db383cc3e26f4403c6c51420270b2370b980fefbf919996b9f5e4460",
+      "last_change_commit": "592976a5aaf9c28e7dd1793fbe2c0f9d1341deb5"
+    },
+    {
+      "repository_dir": "upstream-wenzheng",
+      "path": "utils/melt/layers/layers.py",
+      "git_blob": "5bf9db3ee9fc0d9c8f518781fc9a7550907b9dc5",
+      "bytes": 24363,
+      "sha256": "def88ce143d77c48d7df8ad5dbabed4b9db481033ce8605c4d641f0c82333f90",
+      "last_change_commit": "1a8a0211a35c029e5077ec932d04390216543236"
+    },
+    {
+      "repository_dir": "upstream-wenzheng",
+      "path": "utils/melt/tfrecords/write.py",
+      "git_blob": "fdbe3aff68e504d778a8bb48bdc1395c79cf7757",
+      "bytes": 4406,
+      "sha256": "ea20f472574f89f1a70f6b1e5aad124f04e6e103a0ba4b918827c84a0d2ce69a",
+      "last_change_commit": "ff0244b6dcdbdb7987b31d10817a8f8b7b67f613"
+    },
+    {
+      "repository_dir": "upstream-wenzheng",
+      "path": "utils/melt/tfrecords/dataset.py",
+      "git_blob": "de28732ca68c43cff61a40c847f2a7fb1d891b13",
+      "bytes": 6152,
+      "sha256": "eeddb720ce7f8f32b37caf95ec7f198784e5b46dc9e44af3c9c607d74b9af686",
+      "last_change_commit": "d57fd68610de0a07e94cc9050ff7bc44f5988d0f"
+    },
+    {
+      "repository_dir": "upstream-msnews-mind",
+      "path": "crawler/README.md",
+      "git_blob": "a3ff02c9c81e8e2bdebfebf31fa28c484e0e6bf4",
+      "bytes": 777,
+      "sha256": "bdebf3d52cb30324334f99f9c874d31c97a92e52ced545117b54fd406da19491",
+      "last_change_commit": null
+    },
+    {
+      "repository_dir": "upstream-msnews-mind",
+      "path": "crawler/environment.yaml",
+      "git_blob": "7f14ac9c543ef84ea977b0706d044361042807d0",
+      "bytes": 2053,
+      "sha256": "4b3b4e3ec0fd795a5370bafa11a4af42fc46336bc0ba0f1df846eb92bd9b3326",
+      "last_change_commit": null
+    },
+    {
+      "repository_dir": "upstream-msnews-mind",
+      "path": "crawler/msn/spiders/msn_spider.py",
+      "git_blob": "8933371f1160b127fa2d1e4636446d5ceb523d24",
+      "bytes": 1935,
+      "sha256": "a13722bc54d087f7c3360274d53a600ce6c44985f5bec9cfd75bff3780744766",
+      "last_change_commit": null
+    },
+    {
+      "repository_dir": "upstream-msnews-mind",
+      "path": "crawler/msn/items.py",
+      "git_blob": "fe50ec3a8853f0f58903e09237c070810c552278",
+      "bytes": 259,
+      "sha256": "0ac6e3c5ec6cfdc9334ef0ef3d6abc79d35fdfec2b6d9c59b7b0cf72c23f5502",
+      "last_change_commit": null
+    },
+    {
+      "repository_dir": "upstream-mind",
+      "path": "projects/ai/mind/src/tools/glove-100.sh",
+      "git_blob": "ab7a0ab28e2ec0c2fd3d0f7b8efe4bb680fe5bb8",
+      "bytes": 2225,
+      "sha256": "46705880f1799ff17b46828c157d97b1e1d32473c66b433176afc8fb7eb81dc8",
+      "last_change_commit": null
+    },
+    {
+      "repository_dir": "upstream-mind",
+      "path": "projects/ai/mind/src/tools/merge-word-emb.py",
+      "git_blob": "78de5188288196452d464d21ecd856e87e414cf9",
+      "bytes": 1344,
+      "sha256": "bf51808f8e160038d7fde5820174a4a38479fabd8a23609ff6bd42ebcb42c407",
+      "last_change_commit": null
+    },
+    {
+      "repository_dir": "upstream-mind",
+      "path": "projects/ai/mind/src/tools/to-corpus.py",
+      "git_blob": "e413b8efd051c82b1eb58204378793475c775115",
+      "bytes": 1309,
+      "sha256": "438e3a8d8ecd2b6d0d34f8de74b0d679af76c7eb53babb6635b0b5943bb92c46",
+      "last_change_commit": null
+    }
+  ],
+  "symbol_resolution": {
+    "gezi.Vocab": "NOT FOUND in wenzheng/gezi HEAD; that snapshot exports Vocabulary instead; no alias shown.",
+    "gezi.WordCounter": "FOUND in wenzheng/utils/gezi/word_counter.py; pure Python class.",
+    "gezi.pad": "FOUND in wenzheng/utils/gezi/util.py.",
+    "melt.length": "FOUND in wenzheng/utils/melt/ops/ops.py.",
+    "melt.lookup_feats": "NOT FOUND in public wenzheng/melt checkout; MIND calls it twice in src/model.py.",
+    "melt.layers.PrEmbedding": "NOT FOUND in public wenzheng/melt checkout; MIND calls it from src/util.py.",
+    "melt.layers.Pooling": "FOUND in old wenzheng/melt; generic pooling API differs from MIND-required wrapper/DIN interfaces.",
+    "melt.layers.PoolingWrapper": "NOT FOUND in public wenzheng/melt checkout.",
+    "melt.layers.DinAttention": "NOT FOUND in public wenzheng/melt checkout.",
+    "serialization": "melt.tfrecords.Writer and Dataset exist in old snapshot; melt.gen_feature used by MIND prepare/gen-records.py is not present in this public snapshot."
+  },
+  "runtime_checks": {
+    "environment_file": "compat_environment.json",
+    "runtime_result_file": "artifacts/melt_runtime_check.json",
+    "tensorflow": "1.14.0",
+    "python": "3.7.6",
+    "protobuf": "3.20.3",
+    "numpy": "1.21.6",
+    "melt.length": "PASS_STRUCTURAL_ONLY",
+    "Pooling_attention": "PASS_STRUCTURAL_ONLY_WITH_MASK_WIDTH_LIMIT",
+    "package_import": "BLOCKED_MISSING_SCIPY"
+  },
+  "history_search": {
+    "status": "SEARCHED_BOUNDED_PUBLIC_REMOTE_HISTORY_NO_MATCHING_PYTHON_DEFINITION_CONFIRMED",
+    "repositories": {
+      "wenzheng": {
+        "url": "https://github.com/chenghuige/wenzheng.git",
+        "head": "d57fd68610de0a07e94cc9050ff7bc44f5988d0f",
+        "missing_objects_fetched_with_authorized_network": true,
+        "searched": [
+          "class Vocab",
+          "lookup_feats",
+          "LookupArray",
+          "PrEmbedding",
+          "PoolingWrapper",
+          "DinAttention"
+        ],
+        "result": "no positive definition hit identified"
+      },
+      "gezi": {
+        "url": "https://github.com/chenghuige/gezi.git",
+        "head": "4fc8f9a3c5837e8add720bf6954a4f52abfff8b5",
+        "missing_objects_fetched_with_authorized_network": true,
+        "searched": [
+          "class Vocab",
+          "lookup_feats",
+          "LookupArray",
+          "PrEmbedding",
+          "PoolingWrapper",
+          "DinAttention"
+        ],
+        "result": "Vocab-like history hits are C++ Vocabulary.h, not Python gezi.Vocab; no Python definition/alias/re-export confirmed"
+      },
+      "melt": {
+        "url": "https://github.com/chenghuige/melt.git",
+        "head": "d2646ffe84eabab464b4bef6b31d218abdbf6ce5",
+        "missing_objects_fetched_with_authorized_network": true,
+        "searched": [
+          "class Vocab",
+          "lookup_feats",
+          "LookupArray",
+          "PrEmbedding",
+          "PoolingWrapper",
+          "DinAttention"
+        ],
+        "result": "Vocab-like hit is C++ Vocabulary.h; no Python definitions for the other requested symbols positively identified"
+      }
+    },
+    "false_positive_definition_evidence": [
+      {
+        "repository": "chenghuige/gezi",
+        "commit": "786ef3627730df4ff8bc7f60a6d539282174fcab",
+        "path": "python-wrapper/include.python/nlp/Vocabulary.h",
+        "kind": "C++ class gezi::Vocabulary"
+      },
+      {
+        "repository": "chenghuige/gezi",
+        "commit": "4fc8f9a3c5837e8add720bf6954a4f52abfff8b5",
+        "path": "python-wrapper-castxml/include.python/nlp/Vocabulary.h",
+        "kind": "C++ header removal"
+      },
+      {
+        "repository": "chenghuige/melt",
+        "commit": "cec3ff3b70d99806e7a8489e5c6a40cc5827d35a",
+        "path": "python-wrapper/gezi.include.python/nlp/Vocabulary.h",
+        "kind": "C++ class gezi::Vocabulary"
+      }
+    ],
+    "interpretation": "Not found in the searched public repositories/history. This does not prove that implementations never existed. MIND README separately states its training loop using melt/gezi/husky is not open sourced; exact version correspondence to MIND is not proven."
+  },
+  "runtime_environment": "compat_environment.json",
+  "runtime_package_imports": {
+    "gezi": "IMPORT_OK; exports Vocabulary, WordCounter, pad; no Vocab",
+    "melt": "BLOCKED: ModuleNotFoundError: official"
+  }
+}

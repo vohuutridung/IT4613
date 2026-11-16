@@ -1,0 +1,19 @@
+{
+  "repository_url": "https://github.com/chenghuige/mind.git",
+  "retrieval_method": "git clone over escalated network access, then detached checkout",
+  "clone_command": "git clone https://github.com/chenghuige/mind.git upstream-mind",
+  "checkout_command": "git -C upstream-mind checkout --detach f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
+  "requested_commit": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
+  "verified_head": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
+  "tree_object": "70632beb34df453ab38c5e20fc94e59664a90589",
+  "parent_commit": "d9c7555518ab79d590268ff31ffbf94d0cb304e6",
+  "commit_metadata": [
+    "2021-03-10T19:21:10+08:00",
+    "Update README.md"
+  ],
+  "working_tree_status": "clean",
+  "tracked_file_count": 332,
+  "file_manifest": "source_manifest.json",
+  "archive_sha256": null,
+  "note": "This is a Git checkout, not a codeload archive; no archive checksum is claimed."
+}

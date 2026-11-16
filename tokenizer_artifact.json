@@ -1,0 +1,34 @@
+{
+  "status": "STRUCTURAL_CANDIDATE_ONLY_NOT_LINKED_TO_MIND_LOCAL_ARTIFACT",
+  "repository": "https://huggingface.co/google-bert/bert-base-cased",
+  "revision": "378aa1bda6387fd00e824948ebe3488630ad8565",
+  "revision_date": "2020-12-14T23:00:24Z",
+  "downloaded_files": [
+    {
+      "path": "artifacts/tokenizers/bert-base-cased-378aa1bda6387fd00e824948ebe3488630ad8565/config.json",
+      "bytes": 433,
+      "sha256": "ec2b6cd6ce741dda6c972aea96f9d1a449cbb4b5349e688c5370a9b2f6872d30"
+    },
+    {
+      "path": "artifacts/tokenizers/bert-base-cased-378aa1bda6387fd00e824948ebe3488630ad8565/tokenizer.json",
+      "bytes": 435797,
+      "sha256": "5b3360be30cdf39081153cf9d30bfb0503c011462fc9f77f097127c83ef0f4d9"
+    },
+    {
+      "path": "artifacts/tokenizers/bert-base-cased-378aa1bda6387fd00e824948ebe3488630ad8565/tokenizer_config.json",
+      "bytes": 29,
+      "sha256": "adac4eb1158c23ecf85b5215105c1d0bcc42e34d6a9f82d637018f4b7f0b1aa2"
+    },
+    {
+      "path": "artifacts/tokenizers/bert-base-cased-378aa1bda6387fd00e824948ebe3488630ad8565/vocab.txt",
+      "bytes": 213450,
+      "sha256": "eeaa9875b23b04b4c54ef759d03db9d1ba1554838f8fb26c5d96fa551df93d02"
+    }
+  ],
+  "special_tokens_map_json": "404 at this revision; not part of the source snapshot; special IDs are read from tokenizer vocab/config via Transformers.",
+  "not_downloaded": [
+    "model weight files"
+  ],
+  "transformers_runtime": "5.20.2 in project .venv, Python 3.11.15",
+  "source_reference": "MIND notebook uses AutoTokenizer.from_pretrained(/home/gezi/data/lm/bert-base-cased) with no HF repository ID, revision, or transformers pin. This artifact revision is a dated official candidate, not proven to be that local directory."
+}

@@ -1,0 +1,250 @@
+{
+  "implementation_status": "ACTIVE_NO_BODY_15_FIELD_REIMPLEMENTATION; NOT AUTHOR IMPLEMENTATION OR NUMERICALLY EQUIVALENT",
+  "configuration_source": "configs/mind_no_body_15field.json",
+  "stop_boundary": "The field encoder contract ends after these 15 [B,100] vectors, before feature interaction. The recommendation pipeline is documented separately.",
+  "embedding_width": 100,
+  "runtime_dtype": "float32",
+  "field_order": [
+    "uid",
+    "did",
+    "his_id",
+    "cat",
+    "sub_cat",
+    "title_entities",
+    "abstract_entities",
+    "his_title_merge_entities",
+    "his_abstract_merge_entities",
+    "his_cats",
+    "his_sub_cats",
+    "cur_title",
+    "his_title",
+    "cur_abstract",
+    "his_abstract"
+  ],
+  "fields": [
+    {
+      "order": 1,
+      "key": "uid",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "uid embedding lookup",
+      "weight_state": "embedding/attention weights are initialized by the local implementation"
+    },
+    {
+      "order": 2,
+      "key": "did",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "candidate news ID embedding lookup",
+      "weight_state": "embedding/attention weights are initialized by the local implementation"
+    },
+    {
+      "order": 3,
+      "key": "his_id",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "masked attention pool of up to 200 reversed history did embeddings; query-free att decision",
+      "weight_state": "embedding/attention weights are initialized by the local implementation"
+    },
+    {
+      "order": 4,
+      "key": "cat",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "candidate category embedding lookup",
+      "weight_state": "embedding/attention weights are initialized by the local implementation"
+    },
+    {
+      "order": 5,
+      "key": "sub_cat",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "candidate subcategory embedding lookup",
+      "weight_state": "embedding/attention weights are initialized by the local implementation"
+    },
+    {
+      "order": 6,
+      "key": "title_entities",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "entity + type embeddings, masked attention pooling",
+      "weight_state": "derived MIND entity matrix initializer; entity-type embedding remains initialized"
+    },
+    {
+      "order": 7,
+      "key": "abstract_entities",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "abstract entity + type embeddings, masked attention pooling",
+      "weight_state": "derived MIND entity matrix initializer; entity-type embedding remains initialized"
+    },
+    {
+      "order": 8,
+      "key": "his_title_merge_entities",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "DIN over first 2 entities per up to 50 history titles; query=title_entities",
+      "weight_state": "derived MIND entity matrix initializer; entity-type embedding remains initialized"
+    },
+    {
+      "order": 9,
+      "key": "his_abstract_merge_entities",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "DIN over first 2 entities per up to 10 history abstracts; query=abstract_entities",
+      "weight_state": "derived MIND entity matrix initializer; entity-type embedding remains initialized"
+    },
+    {
+      "order": 10,
+      "key": "his_cats",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "shared masked attention pool over history category embeddings",
+      "weight_state": "embedding/attention weights are initialized by the local implementation"
+    },
+    {
+      "order": 11,
+      "key": "his_sub_cats",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "same pool layer as his_cats over history subcategory embeddings",
+      "weight_state": "embedding/attention weights are initialized by the local implementation"
+    },
+    {
+      "order": 12,
+      "key": "cur_title",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "shared word table + title attention pool; BERT cased tokenizer IDs, not BERT encoder",
+      "weight_state": "local MIND title/abstract GloVe initializer with provenance; attention/DIN weights remain initialized"
+    },
+    {
+      "order": 13,
+      "key": "his_title",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "same title encoder per news + title DIN; query=cur_title",
+      "weight_state": "local MIND title/abstract GloVe initializer with provenance; attention/DIN weights remain initialized"
+    },
+    {
+      "order": 14,
+      "key": "cur_abstract",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "shared word table + abstract attention pool",
+      "weight_state": "local MIND title/abstract GloVe initializer with provenance; attention/DIN weights remain initialized"
+    },
+    {
+      "order": 15,
+      "key": "his_abstract",
+      "shape": "[B,100]",
+      "dtype": "float32",
+      "construction": "same abstract encoder per news + abstract DIN; query=cur_abstract",
+      "weight_state": "local MIND title/abstract GloVe initializer with provenance; attention/DIN weights remain initialized"
+    }
+  ],
+  "sharing": {
+    "word_embedding": "one table shared by title and abstract; no body branch",
+    "candidate_history_text_encoder": "same per-field attention pooling module used for current news and each history news",
+    "entity_tables": "one entity table and one type table shared across candidate and history branches",
+    "candidate_entity_pool": "one entity attention pool shared by title and abstract entities",
+    "history_category_pool": "one attention pool shared by category and subcategory histories",
+    "history_entity_din": "one DIN shared by title-entity and abstract-entity history branches",
+    "text_din": "separate DIN per title and abstract; no body DIN"
+  },
+  "din_queries": {
+    "his_title": "cur_title",
+    "his_abstract": "cur_abstract",
+    "his_title_merge_entities": "title_entities",
+    "his_abstract_merge_entities": "abstract_entities",
+    "his_id": "query-free masked attention is retained as a reimplementation assumption; original PoolingWrapper query use remains UNVERIFIED"
+  },
+  "decisions_and_differences": [
+    "DIN local activation uses concat(query,key,query-key,query*key), sigmoid hidden width 100, then normalized softmax; exact private dependency math was unavailable.",
+    "Attention pooling uses a 128-wide ReLU scorer and explicit masks; private dependency numerical equivalence is not claimed.",
+    "Entity and type embeddings are added before pooling; the local pooling/DIN mask uses entity ID PAD. A PAD type on a real entity is not separately zeroed, matching the visible upstream addition call; private length/mask behavior and the type-PAD vector value remain unverified.",
+    "Empty histories return zero vectors; padded positions get zero attention mass.",
+    "Fresh Keras initialized weights are not learned. Deterministic seeded initialization is available only for explicit fixture use.",
+    "No checkpoint is required for initialized forward.",
+    "UID keeps full lookup IDs for traceability, but the embedding table is capped by test_start + min_uid_count; IDs beyond its row count map to UNK. The DB/vocabulary are not truncated or rebuilt.",
+    "Entity matrix is locally derived from provided MIND entity_embedding.vec files; it is not the author prebuilt entity_emb.npy. Missing/special rows use seeded uniform initialization."
+  ],
+  "uid_embedding_contract": {
+    "full_mapping_retained": true,
+    "threshold_source": "upstream-mind/projects/ai/mind/src/config.py:325-326 and src/util.py:63-70,143-190,239-249",
+    "selection": "source-derived weighted source_count >= test_start + min_uid_count; preserve PAD=0 and UNK=1 rows",
+    "mapping_order_caveat": "mapping uses this reimplementation stable order; equivalence to private gezi.Vocab ID ordering is unverified",
+    "out_of_table_policy": "full UID vocabulary ID >= embedding row count maps to UNK=1",
+    "verified_full_database": {
+      "threshold": 1000010,
+      "embedding_rows": 113534,
+      "largest_valid_id": 113533,
+      "first_excluded_id": 113534
+    }
+  },
+  "news_duplicate_policy": {
+    "precedence": [
+      "train",
+      "dev",
+      "test"
+    ],
+    "rule": "first occurrence wins only when the complete raw row matches; conflicting duplicate metadata raises ValueError",
+    "retained_audit": {
+      "duplicate_occurrences": 164132,
+      "conflicts": 0
+    }
+  },
+  "word_pretraining": {
+    "status": "trained MIND title/abstract metadata GloVe reimplementation; not author original artifact",
+    "matrix": "artifacts/mind_large_prepared/embeddings/word_glove_title_abstract_l2.npy",
+    "manifest": "artifacts/mind_large_prepared/embeddings/word_glove_title_abstract_l2.manifest.json",
+    "shape": [
+      28996,
+      100
+    ],
+    "dtype": "float32",
+    "trained_coverage": 0.8859803414381789,
+    "trained_vectors_found": 25689,
+    "vocabulary_rows_excluding_PAD": 28995,
+    "missing_vectors_excluding_PAD": 3306,
+    "pad": "zero vector at ID 0",
+    "unk": "observed/trained at ID 100",
+    "fallback": "seeded uniform[-0.05,0.05] for missing tokenizer rows; seed 20261024",
+    "normalization": "per-row L2 only for rows present in trained vectors.txt, following upstream merge-word-emb.py; matrix-wide normalization is commented out upstream; fallback rows unchanged; PAD zero",
+    "training_corpus": "unique news title and abstract metadata across train+dev+test; click labels not read",
+    "matrix_sha256": "4415c1502bb30565799e81a449e8c34e64104276540e5ac29f3d6a37d7bcef82",
+    "mapping_sha256": "848aecb3c89b8a1f11d45d40bba05a1c81322740f745228c746c0e22ed296c7a",
+    "original_reimplementation_matrix": "artifacts/mind_large_prepared/embeddings/word_glove_title_abstract.npy",
+    "original_matrix_sha256": "7e9f9b150362a3a5970be9f1b404ffc62acb28ab98b76ce455adf14f90430602",
+    "normalized_rows": 25689,
+    "fallback_rows_unchanged": 3306,
+    "trained_row_l2_norm_range": [
+      0.9999998211860657,
+      1.0000001192092896
+    ]
+  },
+  "upstream_source_field_count": 17,
+  "upstream_source_field_order": [
+    "uid",
+    "did",
+    "his_id",
+    "cat",
+    "sub_cat",
+    "title_entities",
+    "abstract_entities",
+    "his_title_merge_entities",
+    "his_abstract_merge_entities",
+    "his_cats",
+    "his_sub_cats",
+    "cur_title",
+    "his_title",
+    "cur_abstract",
+    "his_abstract",
+    "cur_body",
+    "his_body"
+  ],
+  "active_variant": "title_abstract_metadata_15field",
+  "body_variant_decision": "cur_body and his_body intentionally excluded from this permitted variant; no zero vectors/placeholders and no body artifact required",
+  "preprocessing_fingerprint_scope": "stage-01 data-generation semantics only; active encoder variant lives separately in ENCODER_CONFIG",
+  "validation_note": "Static contract only. This cleanup did not run runtime checks; historical reports were superseded and removed."
+}
