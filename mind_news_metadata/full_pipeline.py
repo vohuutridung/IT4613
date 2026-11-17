@@ -14,7 +14,7 @@ import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
 
-from .batch_data import NewsBatchStore, connect_readonly
+from .batch_data import connect_readonly, make_batch_store
 from .field_encoder import (TitleAbstractMetadataEncoder, load_glove_artifact,
                             load_pretrained_matrix, sha256_file)
 from .recommendation_model import NoBodyRecommendationModel, pointwise_bce_sum
@@ -24,7 +24,10 @@ from mind_config import ENCODER_CONFIG, EXECUTION_CONFIG, TRAINING_CONFIG
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT / "artifacts/mind_large_prepared/stage01.sqlite"
+DEFAULT_PREPARED = ROOT / "artifacts/mind_large_prepared"
+DEFAULT_DB = (DEFAULT_PREPARED if
+              (DEFAULT_PREPARED / "compact/compact_manifest.json").is_file()
+              else DEFAULT_PREPARED / "stage01.sqlite")
 DEFAULT_OUT = ROOT / "artifacts/recommendation_runs"
 FIELD_ORDER = TitleAbstractMetadataEncoder.FIELD_ORDER
 
@@ -42,6 +45,7 @@ def _canonical_hash(obj):
 def implementation_fingerprint():
     paths = ["mind_config.py", "configs/mind_no_body_15field.json",
              "mind_data_pipeline/config.py", "mind_news_metadata/batch_data.py",
+             "mind_news_metadata/compact_data.py",
              "mind_news_metadata/encoder_config.py",
              "mind_news_metadata/field_encoder.py", "mind_news_metadata/recommendation_model.py",
              "mind_news_metadata/recommendation_protocol.py", "mind_news_metadata/full_pipeline.py",
@@ -86,6 +90,65 @@ def verified_database_identity(db_path):
     if not requested_db.is_absolute():
         requested_db = Path.cwd() / requested_db
     requested_db = Path(os.path.abspath(str(requested_db)))
+    if requested_db.is_dir():
+        resolved_root = requested_db.resolve(strict=True)
+        manifest_path = resolved_root / "compact/compact_manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError("compact input manifest is missing: {}".format(manifest_path))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("status") != "MIND_COMPACT_MEMMAP_READY":
+            raise ValueError("compact input status is incompatible")
+        observed = {}
+        for row in manifest.get("files", []):
+            rel = Path(row["path"])
+            if rel.is_absolute() or ".." in rel.parts:
+                raise ValueError("unsafe compact manifest path: {}".format(rel))
+            path = resolved_root / "compact" / rel
+            actual, stat = _sha256_stable_file(path)
+            if int(row["bytes"]) != stat.st_size or row["sha256"] != actual:
+                raise ValueError("compact input file differs: {}".format(path))
+            observed[rel.as_posix()] = actual
+        payload = hashlib.sha256(json.dumps(
+            observed, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+        identity = manifest.get("identity", {})
+        observed_bytes = sum(int(row["bytes"]) for row in manifest.get("files", []))
+        if (payload != identity.get("sha256")
+                or observed_bytes != int(identity.get("bytes", -1))):
+            raise ValueError("compact input aggregate fingerprint differs")
+        layout = json.loads(
+            (resolved_root / "compact/layout.json").read_text(encoding="utf-8"))
+        mapping_digest = hashlib.sha256()
+        for field in ("uid", "did", "cat", "sub_cat", "entity", "entity_type", "word"):
+            vocab_path = resolved_root / "vocab" / (field + ".tsv")
+            actual_vocab_sha, _ = _sha256_stable_file(vocab_path)
+            if actual_vocab_sha != layout["vocab"]["tsv_sha256"][field]:
+                raise ValueError("compact vocabulary differs for {}".format(field))
+            mapping_digest.update(field.encode("utf-8") + b"\0")
+            mapping_digest.update(bytes.fromhex(actual_vocab_sha))
+        did_digest = hashlib.sha256()
+        with (resolved_root / "vocab/did.tsv").open(encoding="utf-8") as stream:
+            for line in stream:
+                did_id, raw_did, *_ = line.rstrip("\n").split("\t")
+                if int(did_id) >= 2:
+                    did_digest.update(
+                        "{}\t{}\n".format(int(did_id), raw_did).encode("utf-8"))
+        if (mapping_digest.hexdigest() != identity.get("mapping_sha256")
+                or did_digest.hexdigest() != identity.get("did_mapping_sha256")):
+            raise ValueError("compact vocabulary identity differs")
+        return {
+            "fingerprint": {
+                key: identity[key] for key in (
+                    "bytes", "sha256", "schema_sha256",
+                    "mapping_sha256", "did_mapping_sha256")
+            },
+            "location": {
+                "storage_format": manifest.get("storage_format"),
+                "resolved_database_path": str(resolved_root),
+                "resolved_manifest_path": str(manifest_path),
+                "manifest_sha256_for_trace": sha256_file(manifest_path),
+            },
+        }
     if not requested_db.is_file():
         raise FileNotFoundError("database is not a regular file: {}".format(requested_db))
     resolved_db = requested_db.resolve(strict=True)
@@ -246,7 +309,9 @@ def locked_artifacts(db_path):
     """Bind a run to content compatibility while keeping physical paths trace-only."""
     database = verified_database_identity(db_path)
 
-    out = ROOT / "artifacts/mind_large_prepared"
+    input_path = Path(db_path)
+    out = (input_path.resolve(strict=True) if input_path.is_dir()
+           else ROOT / "artifacts/mind_large_prepared")
     manifest_path = out / "artifact_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     paths = [out / "embeddings/word_glove_title_abstract_l2.npy",
@@ -278,10 +343,13 @@ def locked_artifacts(db_path):
 
 
 def make_model(db_path=DEFAULT_DB):
-    store = NewsBatchStore(db_path)
+    store = make_batch_store(db_path)
     sizes = store.vocab_sizes()
-    emb = ROOT / "artifacts/mind_large_prepared/embeddings"
-    vocab = ROOT / "artifacts/mind_large_prepared/vocab"
+    input_path = Path(db_path)
+    prepared = (input_path.resolve(strict=True) if input_path.is_dir()
+                else ROOT / "artifacts/mind_large_prepared")
+    emb = prepared / "embeddings"
+    vocab = prepared / "vocab"
     entity_manifest = json.loads((emb / "entity_matrix_manifest.json").read_text(encoding="utf-8"))
     if sha256_file(emb / "entity.npy") != entity_manifest["matrix_sha256"]:
         raise ValueError("entity matrix checksum differs from its provenance manifest")
@@ -345,10 +413,7 @@ def iter_train_batches(store, partition, seed=TRAINING_CONFIG["partition_base_se
                        impression_group=EXECUTION_CONFIG.training_impression_group_size,
                        max_impressions=None):
     """Yield sampled arrays in deterministic shuffled-impression order."""
-    con = connect_readonly(store.db_path)
-    ids = np.fromiter((r[0] for r in con.execute(
-        "SELECT id FROM impressions WHERE split='train' ORDER BY line_no")), dtype=np.int64)
-    con.close()
+    ids = store.impression_ids("train")
     rng = np.random.RandomState(seed)
     order = ids[rng.permutation(len(ids))]
     if max_impressions is not None:
@@ -373,9 +438,7 @@ def count_partition_candidates(store, partition, seed=TRAINING_CONFIG["partition
                                impression_group=EXECUTION_CONFIG.partition_count_group_size,
                                max_impressions=None):
     """Exact train-only selector count for fixing the one-epoch LR schedule."""
-    con = connect_readonly(store.db_path)
-    ids = np.fromiter((r[0] for r in con.execute(
-        "SELECT id FROM impressions WHERE split='train' ORDER BY line_no")), dtype=np.int64)
+    ids = store.impression_ids("train")
     rng = np.random.RandomState(seed)
     order = ids[rng.permutation(len(ids))]
     if max_impressions is not None:
@@ -383,30 +446,23 @@ def count_partition_candidates(store, partition, seed=TRAINING_CONFIG["partition
     positives = negatives = impression_count = 0
     for start in range(0, len(order), int(impression_group)):
         part_ids = order[start:start + int(impression_group)].tolist()
-        marks = ",".join("?" for _ in part_ids)
-        rows = con.execute("""
-          SELECT i.id,i.impression_id,c.position,l.click,l.labeled
-          FROM impressions i JOIN candidates c ON c.impression_id=i.id
-          JOIN labels l ON l.candidate_id=c.id
-          WHERE i.id IN (""" + marks + ") ORDER BY i.id,c.position", part_ids).fetchall()
-        by_imp = {}
-        for row in rows:
-            by_imp.setdefault(row[0], []).append(row)
+        by_imp = store.candidate_groups("train", part_ids)
         for iid in part_ids:
-            group = by_imp.get(iid, [])
-            if not group:
+            group = by_imp.get(iid)
+            if group is None:
                 continue
-            if not all(row[4] for row in group):
+            if len(group["click"]) == 0:
+                continue
+            if not bool(np.asarray(group["labeled"]).all()):
                 raise ValueError("unlabeled candidate in train partition count")
             keep = partition_for_impression(
-                [int(row[3]) for row in group], [int(row[2]) for row in group],
-                group[0][1], partition, partitions=TRAINING_CONFIG["partition_count"],
+                group["click"], group["positions"], group["impression_id"],
+                partition, partitions=TRAINING_CONFIG["partition_count"],
                 base_seed=seed, split="train")
-            selected = [row[3] for row, use in zip(group, keep) if use]
+            selected = np.asarray(group["click"])[keep]
             positives += sum(int(x) == 1 for x in selected)
             negatives += sum(int(x) == 0 for x in selected)
             impression_count += 1
-    con.close()
     return {"partition": int(partition), "impressions_with_candidates": impression_count,
             "positives": positives, "negatives": negatives,
             "selected_candidates": positives + negatives,

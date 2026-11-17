@@ -1,4 +1,4 @@
-"""No-body 15-field batch view over the prepared MIND-large SQLite artifact."""
+"""No-body 15-field batch views over SQLite or compact MIND artifacts."""
 import sqlite3
 import struct
 import time
@@ -23,6 +23,14 @@ def connect_readonly(db_path):
     conn = sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)
     conn.execute("PRAGMA query_only=ON")
     return conn
+
+
+def make_batch_store(data_path):
+    path = Path(data_path)
+    if path.is_dir() and (path / "compact/compact_manifest.json").is_file():
+        from .compact_data import CompactNewsBatchStore
+        return CompactNewsBatchStore(path)
+    return NewsBatchStore(path)
 
 
 def _padding_array(shape, dtype=np.int32):
@@ -151,6 +159,71 @@ class NewsBatchStore:
             conn.close()
         sizes["uid"] = self.uid_embedding_rows()
         return sizes
+
+    def impression_ids(self, split):
+        conn = connect_readonly(self.db_path)
+        try:
+            return np.fromiter(
+                (row[0] for row in conn.execute(
+                    "SELECT id FROM impressions WHERE split=? ORDER BY line_no",
+                    (split,))),
+                dtype=np.int64)
+        finally:
+            conn.close()
+
+    def count_candidates(self, split):
+        conn = connect_readonly(self.db_path)
+        try:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM candidates c JOIN impressions i "
+                "ON i.id=c.impression_id WHERE i.split=?", (split,)).fetchone()[0])
+        finally:
+            conn.close()
+
+    def candidate_groups(self, split, impression_ids):
+        ids = [int(value) for value in impression_ids]
+        if not ids:
+            return {}
+        conn = connect_readonly(self.db_path)
+        try:
+            marks = ",".join("?" for _ in ids)
+            query = """
+              SELECT i.id,i.impression_id,c.position,l.click,l.labeled
+              FROM impressions i JOIN candidates c ON c.impression_id=i.id
+              JOIN labels l ON l.candidate_id=c.id
+              WHERE i.split=? AND i.id IN ({})
+              ORDER BY i.id,c.position
+            """.format(marks)
+            rows = conn.execute(query, [split] + ids).fetchall()
+        finally:
+            conn.close()
+        grouped = {value: [] for value in ids}
+        for row in rows:
+            grouped[int(row[0])].append(row)
+        return {
+            key: {
+                "impression_id": group[0][1],
+                "positions": np.asarray([row[2] for row in group], np.int64),
+                "click": np.asarray([row[3] for row in group], np.int32),
+                "labeled": np.asarray([row[4] for row in group], np.bool_),
+            }
+            for key, group in grouped.items() if group
+        }
+
+    def iter_submission_keys(self, split="test"):
+        conn = connect_readonly(self.db_path)
+        try:
+            rows = conn.execute("""
+              SELECT i.impression_id,c.position,n.news_id
+              FROM impressions i JOIN candidates c ON c.impression_id=i.id
+              LEFT JOIN news n ON n.did=c.did
+              WHERE i.split=?
+              ORDER BY i.line_no,c.position
+            """, (split,))
+            for impression_id, position, news_id in rows:
+                yield str(impression_id), int(position), news_id
+        finally:
+            conn.close()
 
     def batch(self, split, limit=EXECUTION_CONFIG.default_candidate_batch_size, offset=0, after_key=None,
               impression_ids=None, partition=None,

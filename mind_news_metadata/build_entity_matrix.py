@@ -40,11 +40,14 @@ def _read_vocab(path):
     return tokens
 
 
-def build(db_path, out_path, manifest_path, mapping_path, seed=None, data_root=None):
+def build(db_path, out_path, manifest_path, mapping_path, seed=None, data_root=None,
+          compact_root=None):
     seed = ARTIFACT_CONFIG.initialization_seed if seed is None else int(seed)
-    db_path, out_path = Path(db_path), Path(out_path)
+    db_path = Path(db_path) if db_path else None
+    out_path = Path(out_path)
     manifest_path, mapping_path = Path(manifest_path), Path(mapping_path)
     data_root = Path(data_root or ROOT / "data")
+    prepared_root = Path(compact_root) if compact_root else db_path.parent
     tokens = _read_vocab(mapping_path)
     token_to_id = {token: i for i, token in enumerate(tokens)}
     if len(token_to_id) != len(tokens):
@@ -139,22 +142,28 @@ def build(db_path, out_path, manifest_path, mapping_path, seed=None, data_root=N
       "matrix_shape": list(matrix.shape),
       "matrix_dtype": str(matrix.dtype),
       "matrix_sha256": sha256(out_path),
-      "database_path": str(db_path),
-      "database_artifact_sha256": next((x["sha256"] for x in json.load(open(db_path.parent / "artifact_manifest.json", encoding="utf-8")).get("artifacts", []) if x["path"] == "stage01.sqlite"), None),
+      "database_path": str(prepared_root),
+      "database_artifact_sha256": (
+          json.loads((prepared_root / "compact/compact_manifest.json").read_text(
+              encoding="utf-8"))["identity"]["sha256"]
+          if compact_root else
+          next((x["sha256"] for x in json.load(open(
+              prepared_root / "artifact_manifest.json", encoding="utf-8")).get(
+                  "artifacts", []) if x["path"] == "stage01.sqlite"), None)),
       "raw_data_manifest_sha256": sha256(data_manifest_path),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     # Extend the stage artifact manifest without rewriting any database rows.
-    artifact_path = db_path.parent / "artifact_manifest.json"
+    artifact_path = prepared_root / "artifact_manifest.json"
     if artifact_path.is_file():
         artifact = json.load(open(artifact_path, encoding="utf-8"))
         entries = {x["path"]: x for x in artifact.get("artifacts", [])}
         for path in (out_path, manifest_path):
-            rel = str(path.relative_to(db_path.parent))
+            rel = str(path.relative_to(prepared_root))
             entries[rel] = {"path": rel, "bytes": path.stat().st_size, "sha256": sha256(path)}
         artifact["artifacts"] = [entries[k] for k in sorted(entries)]
         artifact["entity_pretrained_available"] = True
-        artifact["entity_matrix_manifest"] = str(manifest_path.relative_to(db_path.parent))
+        artifact["entity_matrix_manifest"] = str(manifest_path.relative_to(prepared_root))
         artifact_path.write_text(json.dumps(artifact, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return manifest
 
@@ -167,9 +176,10 @@ def main():
     ap.add_argument("--mapping", default="artifacts/mind_large_prepared/vocab/entity.tsv")
     ap.add_argument("--seed", type=int, default=ARTIFACT_CONFIG.initialization_seed)
     ap.add_argument("--data-root", default="data")
+    ap.add_argument("--compact-root")
     args = ap.parse_args()
     print(json.dumps(build(args.db, args.out, args.manifest, args.mapping,
-                           args.seed, args.data_root), indent=2))
+                           args.seed, args.data_root, args.compact_root), indent=2))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ metadata, không dùng body.
 Notebook Kaggle mẫu:
 
 ```text
-deployment/kaggle/notebook/mind_15field_training.ipynb
+deployment/kaggle/notebook/[IT4613] pipeline.ipynb
 ```
 
 ## Chạy trên Kaggle
@@ -47,10 +47,14 @@ Prepared bundle được tạo tại:
 /kaggle/working/mind15/prepared
 ```
 
-Bundle gồm SQLite, vocab, word/entity matrices, train-DID membership và
-manifest SHA-256. Save Version rồi tạo Kaggle Dataset từ thư mục này để tái sử
-dụng. Bundle chưa qua neural encoder, nên vẫn dùng được khi đổi attention/DIN/
-MLP nhưng giữ nguyên tokenizer, vocab, input lengths và field schema.
+Bundle dùng compact typed arrays/memmap, không tạo SQLite candidate database.
+Impression/candidate/history được lưu bằng mảng số và offsets; news feature lưu
+một lần theo DID. Bundle còn chứa vocab, word/entity matrices, train-DID
+membership và manifest SHA-256. Mục tiêu kích thước là khoảng 3–8 GB thay vì
+hàng chục GB. Save Version rồi tạo Kaggle Dataset từ thư mục này để tái sử dụng.
+
+Bundle chưa qua neural encoder, nên vẫn dùng được khi đổi attention/DIN/MLP
+nhưng giữ nguyên tokenizer, vocab, input lengths và field schema.
 
 ### 2. Train một model và tạo submission
 

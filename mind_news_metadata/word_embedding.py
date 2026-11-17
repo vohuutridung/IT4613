@@ -122,6 +122,75 @@ def build_corpus(db_path, word_vocab_path, out_path, limit_news=None):
     return manifest
 
 
+def build_corpus_compact(prepared_root, word_vocab_path, out_path, limit_news=None):
+    """Build the identical metadata corpus from compact news arrays."""
+    prepared_root = Path(prepared_root)
+    compact = prepared_root / "compact"
+    manifest = json.loads(
+        (compact / "compact_manifest.json").read_text(encoding="utf-8"))
+    words, _ = read_word_vocab(word_vocab_path)
+    news_root = compact / "news"
+    present = np.load(news_root / "present.npy", mmap_mode="r")
+    source_split = np.load(news_root / "source_split.npy", mmap_mode="r")
+    title = np.load(news_root / "title.npy", mmap_mode="r")
+    abstract = np.load(news_root / "abstract.npy", mmap_mode="r")
+    split_names = ("train", "dev", "test")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    split_counts = collections.Counter()
+    token_counts = collections.Counter()
+    news_count = title_docs = abstract_docs = token_total = 0
+    started = time.time()
+    with out_path.open("w", encoding="utf-8", newline="\n") as out:
+        for did in np.flatnonzero(present):
+            if limit_news is not None and news_count >= int(limit_news):
+                break
+            for field, values in (("title", title[did]), ("abstract", abstract[did])):
+                ids = np.asarray(values)
+                ids = ids[ids != 0]
+                try:
+                    tokens = [words[int(value)] for value in ids]
+                except IndexError as exc:
+                    raise ValueError(
+                        "compact word token ID outside locked vocabulary at DID {}".format(
+                            did)) from exc
+                out.write(" ".join(tokens) + "\n")
+                token_counts[field] += len(tokens)
+                token_total += len(tokens)
+                if field == "title":
+                    title_docs += 1
+                else:
+                    abstract_docs += 1
+            split_counts[split_names[int(source_split[did])]] += 1
+            news_count += 1
+    result = {
+        "status": "MIND_NEWS_METADATA_CORPUS_NO_CLICK_LABELS",
+        "source_database": str(prepared_root),
+        "source_database_sha256": manifest["identity"]["sha256"],
+        "source_table": "compact/news arrays indexed by DID",
+        "source_split_counts": dict(split_counts),
+        "metadata_scope": "train+dev+test news metadata; first-occurrence rows already resolved by stage-01 policy",
+        "news_rows": news_count,
+        "documents": {"title": title_docs, "abstract": abstract_docs,
+                      "total": title_docs + abstract_docs},
+        "tokens_nonpadding": dict(token_counts),
+        "tokens_total": token_total,
+        "document_boundary": "one newline per field; co-occurrence contexts do not cross fields",
+        "token_source": "stored locked tokenizer token IDs in compact news title/abstract arrays; PAD omitted",
+        "tokenizer_vocab_path": str(Path(word_vocab_path)),
+        "tokenizer_vocab_sha256": sha256_file(word_vocab_path),
+        "click_or_label_data_read": False,
+        "corpus_path": str(out_path),
+        "corpus_bytes": out_path.stat().st_size,
+        "corpus_sha256": sha256_file(str(out_path)),
+        "limit_news": limit_news,
+        "elapsed_seconds": round(time.time() - started, 3),
+    }
+    Path(str(out_path) + ".manifest.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return result
+
+
 def run_glove(corpus, out_dir, source_dir, iterations=ITERATIONS, threads=THREADS,
               memory_gb=MEMORY_GB, seed=SEED, smoke=False):
     """Run only Stanford's official GloVe C tools; demo.sh/text8 is never used."""
@@ -289,7 +358,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="command")
     c = sub.add_parser("corpus")
-    c.add_argument("--db", required=True)
+    source = c.add_mutually_exclusive_group(required=True)
+    source.add_argument("--db")
+    source.add_argument("--compact-root")
     c.add_argument("--word-vocab", required=True)
     c.add_argument("--out", required=True)
     c.add_argument("--limit-news", type=int)
@@ -312,7 +383,10 @@ def main():
     m.add_argument("--fallback-seed", type=int, default=SEED)
     a = ap.parse_args()
     if a.command == "corpus":
-        result = build_corpus(a.db, a.word_vocab, a.out, a.limit_news)
+        result = (build_corpus_compact(
+            a.compact_root, a.word_vocab, a.out, a.limit_news)
+            if a.compact_root else
+            build_corpus(a.db, a.word_vocab, a.out, a.limit_news))
     elif a.command == "train":
         result = run_glove(a.corpus, a.out_dir, a.source_dir, a.iterations,
                            a.threads, a.memory_gb, a.seed, a.smoke)

@@ -10,7 +10,7 @@ import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
 
-from .batch_data import connect_readonly
+from .batch_data import make_batch_store
 from .full_pipeline import (DEFAULT_DB, ROOT, TRAINING_CONFIG, EXECUTION_CONFIG,
                             _candidate_mask, _json_hash, _to_tensors,
                             implementation_fingerprint, iter_ordered_batches,
@@ -115,13 +115,7 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     count = 0
-    count_conn = connect_readonly(store.db_path)
-    try:
-        total_candidates = int(count_conn.execute(
-            "SELECT COUNT(*) FROM candidates c JOIN impressions i "
-            "ON i.id=c.impression_id WHERE i.split=?", (split,)).fetchone()[0])
-    finally:
-        count_conn.close()
+    total_candidates = store.count_candidates(split)
     if max_candidates is not None:
         total_candidates = min(total_candidates, int(max_candidates))
     progress = tqdm(total=total_candidates, unit="candidate",
@@ -293,14 +287,8 @@ def submission(inputs, output, db_path=DEFAULT_DB):
     streams = [stream for stream, _ in readers]
     iterators = [iter(reader) for _, reader in readers]
     sentinels = [object() for _ in iterators]
-    conn = connect_readonly(db_path)
-    expected_rows = conn.execute("""
-      SELECT i.impression_id,c.position,n.news_id
-      FROM impressions i JOIN candidates c ON c.impression_id=i.id
-      LEFT JOIN news n ON n.did=c.did
-      WHERE i.split='test'
-      ORDER BY i.line_no,c.position
-    """)
+    store = make_batch_store(db_path)
+    expected_rows = store.iter_submission_keys("test")
 
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -353,7 +341,6 @@ def submission(inputs, output, db_path=DEFAULT_DB):
 
         write_submission_zip(text_path, output)
     finally:
-        conn.close()
         for stream in streams:
             stream.close()
         text_path.unlink(missing_ok=True)

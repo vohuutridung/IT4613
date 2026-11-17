@@ -39,6 +39,26 @@ def _database_identity(db_path):
 
 
 def _load_did_mapping(db_path):
+    db_path = Path(db_path)
+    if db_path.is_dir():
+        mapping = {}
+        digest = hashlib.sha256()
+        expected_id = 2
+        with (db_path / "vocab/did.tsv").open(encoding="utf-8") as stream:
+            for line in stream:
+                did_id, raw_did, *_ = line.rstrip("\n").split("\t")
+                did_id = int(did_id)
+                if did_id < 2:
+                    continue
+                if did_id != expected_id or raw_did in mapping:
+                    raise ValueError(
+                        "DID vocabulary IDs are not a contiguous unique sequence from ID 2")
+                mapping[raw_did] = did_id
+                digest.update("{}\t{}\n".format(did_id, raw_did).encode("utf-8"))
+                expected_id += 1
+        if not mapping:
+            raise ValueError("DID vocabulary mapping is empty")
+        return mapping, digest.hexdigest()
     conn = connect_readonly(db_path)
     try:
         rows = conn.execute(

@@ -45,7 +45,12 @@ if [[ -z "$UV" ]]; then
   UV="$(python3 -m site --user-base)/bin/uv"
 fi
 
+REQUIREMENTS="$ROOT/deployment/kaggle/requirements.txt"
 VENV="$WORK_ROOT/python311-tf215"
+if [[ "$MODE" == "prepare" ]]; then
+  REQUIREMENTS="$ROOT/deployment/kaggle/requirements-prepare.txt"
+  VENV="$WORK_ROOT/python311-prepare"
+fi
 PYTHON="$VENV/bin/python"
 export UV_CACHE_DIR="$WORK_ROOT/.uv-cache"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -55,13 +60,16 @@ if [[ ! -x "$PYTHON" ]]; then
   "$UV" venv --python 3.11.15 "$VENV"
 fi
 
-REQ_HASH="$(shasum -a 256 "$ROOT/deployment/kaggle/requirements.txt" | awk '{print $1}')"
+REQ_HASH="$(shasum -a 256 "$REQUIREMENTS" | awk '{print $1}')"
 REQ_MARKER="$VENV/.mind15-requirements-$REQ_HASH"
 if [[ ! -f "$REQ_MARKER" ]]; then
   "$UV" pip install --python "$PYTHON" \
-    -r "$ROOT/deployment/kaggle/requirements.txt"
+    -r "$REQUIREMENTS"
   rm -f "$VENV"/.mind15-requirements-*
   touch "$REQ_MARKER"
+  if [[ "$MODE" == "prepare" ]]; then
+    "$UV" cache clean
+  fi
 fi
 
 export PYTHONPATH="$ROOT"
@@ -75,4 +83,7 @@ set +e
 "$PYTHON" "$ROOT/deployment/kaggle/runner.py" "$@" 2>&1 | tee -a "$LOG"
 status=${PIPESTATUS[0]}
 set -e
+if [[ "$status" == "0" && "$MODE" == "prepare" ]]; then
+  rm -rf "$VENV" "$UV_CACHE_DIR" "$WORK_ROOT/tools/GloVe"
+fi
 exit "$status"

@@ -179,7 +179,7 @@ class Runner:
                     "sha256": sha256_file(path),
                 })
         contract = {
-            "schema": "mind_stage01_body_v17_tokenized",
+            "schema": "mind_compact_memmap_v1",
             "source_commit": CONFIG_DATA["source"]["commit"],
             "preprocessing": CONFIG_DATA["preprocessing"],
             "shared_architecture": {
@@ -205,6 +205,25 @@ class Runner:
             json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return bundle
 
+    def _verify_compact_stage(self, prepared: Path):
+        manifest_path = prepared / "compact/compact_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("status") != "MIND_COMPACT_MEMMAP_READY":
+            raise ValueError("compact stage status is incompatible")
+        observed = {}
+        for row in manifest.get("files", []):
+            path = prepared / "compact" / row["path"]
+            if (not path.is_file() or path.stat().st_size != int(row["bytes"])
+                    or sha256_file(path) != row["sha256"]):
+                raise ValueError("compact stage file failed verification: {}".format(path))
+            observed[row["path"]] = row["sha256"]
+        payload = hashlib.sha256(json.dumps(
+            observed, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+        if payload != manifest.get("identity", {}).get("sha256"):
+            raise ValueError("compact stage payload checksum differs")
+        return manifest
+
     def _remove_glove_intermediates(self, prepared: Path):
         """Keep provenance manifests but drop rebuild-only corpus/cooccurrence files."""
         provenance = prepared / "provenance"
@@ -219,6 +238,10 @@ class Runner:
                 path.rmdir()
 
     def verify_bundle(self, prepared: Path):
+        compact_manifest = prepared / "compact/compact_manifest.json"
+        if not compact_manifest.is_file():
+            raise ValueError(
+                "prepared bundle does not contain the compact memmap backend")
         manifest_path = prepared / "prepared_bundle_manifest.json"
         if not manifest_path.is_file():
             raise FileNotFoundError("prepared bundle manifest is missing: {}".format(manifest_path))
@@ -236,7 +259,7 @@ class Runner:
                 "max_history_title_entities_per_news",
                 "max_history_abstract_entities_per_news", "pad_id", "unk_id")
         }
-        if (contract.get("schema") != "mind_stage01_body_v17_tokenized"
+        if (contract.get("schema") != "mind_compact_memmap_v1"
                 or contract.get("source_commit") != CONFIG_DATA["source"]["commit"]
                 or contract.get("preprocessing") != CONFIG_DATA["preprocessing"]
                 or contract.get("shared_architecture") != expected_shared):
@@ -274,18 +297,26 @@ class Runner:
             with self.log.stage("verify-existing-prepared"):
                 self.verify_bundle(prepared)
             return prepared
+        if (prepared / "stage01.sqlite").exists():
+            raise ValueError(
+                "legacy/partial SQLite prepare output exists at {}; use a clean "
+                "--work-root for the compact pipeline".format(prepared))
 
         with self.log.stage("tokenizer"):
             self._tokenizer()
         self.module("scripts.audit_mind_data", "--data", data_root,
                     "--out", ROOT / "artifacts/audit", stage="audit-raw")
         prepared_rel = CANONICAL_PREPARED.relative_to(ROOT)
-        preprocess_args = ["--data-root", data_root, "--out", prepared_rel]
-        if ((prepared / "stage01.sqlite").exists()
-                or (prepared / "state.json").exists()):
-            preprocess_args.append("--resume")
-        self.module("mind_data_pipeline.preprocess", *preprocess_args,
-                    stage="preprocess-stage01")
+        if (prepared / "compact/compact_manifest.json").is_file():
+            with self.log.stage("verify-existing-compact-stage"):
+                self._verify_compact_stage(prepared)
+        else:
+            self.module(
+                "mind_data_pipeline.compact_preprocess",
+                "--data-root", data_root,
+                "--out", prepared_rel,
+                "--data-manifest", ROOT / "artifacts/audit/data_manifest.json",
+                stage="preprocess-compact")
 
         provenance = prepared_rel / "provenance"
         embeddings = prepared_rel / "embeddings"
@@ -294,7 +325,7 @@ class Runner:
         word_vocab = prepared_rel / "vocab/word.tsv"
         source = self._glove_source()
         self.module("mind_news_metadata.word_embedding", "corpus",
-                    "--db", prepared_rel / "stage01.sqlite",
+                    "--compact-root", prepared_rel,
                     "--word-vocab", word_vocab, "--out", corpus,
                     stage="build-glove-corpus")
         self.module("mind_news_metadata.word_embedding", "train",
@@ -317,22 +348,15 @@ class Runner:
                     "--out-manifest", embeddings / "word_glove_title_abstract_l2.manifest.json",
                     stage="normalize-glove")
         self.module("mind_news_metadata.build_entity_matrix",
-                    "--db", prepared_rel / "stage01.sqlite",
+                    "--compact-root", prepared_rel,
                     "--out", embeddings / "entity.npy",
                     "--manifest", embeddings / "entity_matrix_manifest.json",
                     "--mapping", prepared_rel / "vocab/entity.tsv",
                     "--data-root", data_root, stage="build-entity-matrix")
-        membership = prepared_rel / "membership/train_did_membership.npy"
-        self.module("mind_news_metadata.full_pipeline", "build-membership",
-                    "--db", prepared_rel / "stage01.sqlite",
-                    "--train-behaviors", data_root / "MINDlarge_train/behaviors.tsv",
-                    "--output", membership, stage="build-train-did-membership")
         with self.log.stage("finalize-prepared-bundle"):
             self._remove_glove_intermediates(prepared)
             self._finalize_bundle(prepared)
             self.verify_bundle(prepared)
-            from mind_news_metadata.full_pipeline import locked_artifacts
-            locked_artifacts(CANONICAL_PREPARED / "stage01.sqlite")
         return prepared
 
     def use_prepared(self):
@@ -409,7 +433,7 @@ class Runner:
             resume = True
         command = [
             self.python, "-m", "mind_news_metadata.full_pipeline", "train",
-            "--db", CANONICAL_PREPARED / "stage01.sqlite",
+            "--db", CANONICAL_PREPARED,
             "--partition", partition,
             "--seed", self.args.seed,
             "--effective-batch", self.args.effective_batch,
@@ -437,7 +461,7 @@ class Runner:
             "model-{}-test.csv.gz".format(index))
         self.module("mind_news_metadata.full_pipeline", "predict",
                     "--run-dir", run_dir,
-                    "--db", CANONICAL_PREPARED / "stage01.sqlite",
+                    "--db", CANONICAL_PREPARED,
                     "--split", "test", "--profile", "test",
                     "--train-dids", membership, "--output", output,
                     stage="predict-test-model-{}".format(index))
@@ -460,7 +484,7 @@ class Runner:
                 "partition-{}-submission.zip".format(self.args.partition)))
         self.module("mind_news_metadata.full_pipeline", "submit",
                     "--inputs", *predictions,
-                    "--db", CANONICAL_PREPARED / "stage01.sqlite",
+                    "--db", CANONICAL_PREPARED,
                     "--output", output, stage="create-codalab-submission")
         return output
 
