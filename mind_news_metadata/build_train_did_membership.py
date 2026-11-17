@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .batch_data import connect_readonly
 from .full_pipeline import DEFAULT_DB, ROOT, verified_database_identity
@@ -66,7 +67,9 @@ def _behavior_dids(behaviors_path, did_mapping):
     rows = history_count = candidate_count = 0
     with Path(behaviors_path).open("r", encoding="utf-8", newline="") as stream:
         reader = csv.reader(stream, delimiter="\t")
-        for line_no, row in enumerate(reader, 1):
+        for line_no, row in enumerate(
+                tqdm(reader, desc="train DID membership", unit="row",
+                     dynamic_ncols=True, mininterval=1.0), 1):
             if len(row) != 5:
                 raise ValueError("expected five behaviors.tsv columns at line {}".format(line_no))
             _, _, _, history_raw, impressions_raw = row

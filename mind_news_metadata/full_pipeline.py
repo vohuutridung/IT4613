@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
+from tqdm.auto import tqdm
 
 from .batch_data import NewsBatchStore, connect_readonly
 from .field_encoder import (TitleAbstractMetadataEncoder, load_glove_artifact,
@@ -44,7 +45,8 @@ def implementation_fingerprint():
              "mind_news_metadata/encoder_config.py",
              "mind_news_metadata/field_encoder.py", "mind_news_metadata/recommendation_model.py",
              "mind_news_metadata/recommendation_protocol.py", "mind_news_metadata/full_pipeline.py",
-             "mind_news_metadata/prediction.py", "mind_news_metadata/build_train_did_membership.py"]
+             "mind_news_metadata/prediction.py", "mind_news_metadata/submission_format.py",
+             "mind_news_metadata/build_train_did_membership.py"]
     return {path: sha256_file(ROOT / path) for path in paths}
 
 
@@ -691,6 +693,7 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
     examples = 0
     updates_this_run = 0
     loss_sum = 0.0
+    last_effective_loss = None
     loss_parts = []
     label_counts = [0, 0]
     profile = {"trace_seconds": 0.0, "data_batch_wait_seconds": 0.0, "tensor_conversion_seconds": 0.0,
@@ -721,10 +724,13 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
     compute_gradients.get_concrete_function()
     profile["trace_seconds"] = time.perf_counter() - trace_started
     start_time = time.time()
+    progress = tqdm(total=total_updates, initial=update, unit="update",
+                    desc="train partition {}".format(partition), dynamic_ncols=True,
+                    mininterval=1.0)
 
     def apply_accumulated():
         nonlocal update, schedule_index, pending, accumulated_count, accum
-        nonlocal updates_this_run, loss_sum, loss_parts
+        nonlocal updates_this_run, loss_sum, loss_parts, last_effective_loss
         if accumulated_count == 0:
             return
         if schedule_index != update:
@@ -758,7 +764,9 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
         sync_started = time.perf_counter()
         if loss_parts:
             loss_values = np.asarray(tf.stack(loss_parts).numpy(), dtype=np.float64)
-            loss_sum += float(loss_values.sum(dtype=np.float64))
+            effective_loss_sum = float(loss_values.sum(dtype=np.float64))
+            loss_sum += effective_loss_sum
+            last_effective_loss = effective_loss_sum / float(accumulated_count)
         profile["device_sync_and_loss_read_seconds"] += time.perf_counter() - sync_started
         loss_parts = []
         update += 1
@@ -776,6 +784,14 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
             save_started = time.perf_counter()
             manager.save(checkpoint_number=update)
             profile["checkpoint_save_seconds"] += time.perf_counter() - save_started
+        progress.update(1)
+        progress.set_postfix(
+            loss="{:.5f}".format(last_effective_loss) if last_effective_loss is not None else "n/a",
+            lr="{:.3g}".format(lr),
+            examples=int(examples_at_start + examples),
+            ex_s="{:.1f}".format(examples / max(time.time() - start_time, 1e-9)),
+            ckpt=Path(manager.latest_checkpoint).name if manager.latest_checkpoint else "-",
+            refresh=False)
 
     group_iter = iter(groups)
     while True:
@@ -879,8 +895,15 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
         save_started = time.perf_counter()
         manager.save(checkpoint_number=update)
         profile["checkpoint_save_seconds"] += time.perf_counter() - save_started
+    progress.set_postfix(
+        loss="{:.5f}".format(last_effective_loss) if last_effective_loss is not None else "n/a",
+        examples=int(examples_at_start + examples),
+        ckpt=Path(manager.latest_checkpoint).name if manager.latest_checkpoint else "-")
+    progress.close()
     elapsed = time.time() - start_time
-    report = {"status": "PARTIAL_COMPUTE" if (max_updates is not None or max_impressions is not None or stop_after_updates_this_run is not None) else "EPOCH_ITERATOR_EXHAUSTED",
+    full_epoch = max_updates is None and max_impressions is None and stop_after_updates_this_run is None
+    report = {"status": "EPOCH_ITERATOR_EXHAUSTED" if full_epoch else "PARTIAL_COMPUTE",
+              "full_epoch": full_epoch,
               "partition": partition, "examples_this_run": examples,
               "examples_seen_total": int(examples_var.numpy()),
               "sampling_cursor_count": int(sampling_cursor_var.numpy()),
@@ -903,7 +926,6 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
                                      partition, seed, effective_batch, microbatch,
                                      " --max-impressions {}".format(max_impressions) if max_impressions is not None else "",
                                      " --max-updates {}".format(max_updates) if max_updates is not None else "", out_dir)),
-              "full_epoch": max_updates is None and max_impressions is None and stop_after_updates_this_run is None,
               "config_sha256": config_hash}
     (out_dir / "training_progress.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
@@ -981,6 +1003,11 @@ def main():
     pr.add_argument("--max-candidates", type=int)
     en = sub.add_parser("ensemble")
     en.add_argument("--inputs", nargs="+", required=True); en.add_argument("--output", required=True)
+    su = sub.add_parser("submit")
+    su.add_argument("--inputs", nargs="+", required=True,
+                    help="one or more completed full-test prediction CSV.gz files")
+    su.add_argument("--output", required=True)
+    su.add_argument("--db", default=str(DEFAULT_DB))
     mb = sub.add_parser("build-membership")
     mb.add_argument("--db", default=str(DEFAULT_DB)); mb.add_argument("--train-behaviors", required=True)
     mb.add_argument("--output")
@@ -1013,6 +1040,9 @@ def main():
     elif a.command == "ensemble":
         from .prediction import ensemble
         print(json.dumps(ensemble(a.inputs, a.output), indent=2))
+    elif a.command == "submit":
+        from .prediction import submission
+        print(json.dumps(submission(a.inputs, a.output, a.db), indent=2))
 
 
 if __name__ == "__main__":

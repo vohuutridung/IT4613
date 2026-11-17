@@ -8,11 +8,14 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
+from tqdm.auto import tqdm
 
+from .batch_data import connect_readonly
 from .full_pipeline import (DEFAULT_DB, ROOT, TRAINING_CONFIG, EXECUTION_CONFIG,
                             _candidate_mask, _json_hash, _to_tensors,
                             implementation_fingerprint, iter_ordered_batches,
                             locked_artifacts, make_model)
+from .submission_format import format_impression_line, write_submission_zip
 
 
 def file_sha256(path):
@@ -112,6 +115,17 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     count = 0
+    count_conn = connect_readonly(store.db_path)
+    try:
+        total_candidates = int(count_conn.execute(
+            "SELECT COUNT(*) FROM candidates c JOIN impressions i "
+            "ON i.id=c.impression_id WHERE i.split=?", (split,)).fetchone()[0])
+    finally:
+        count_conn.close()
+    if max_candidates is not None:
+        total_candidates = min(total_candidates, int(max_candidates))
+    progress = tqdm(total=total_candidates, unit="candidate",
+                    desc="predict {}".format(split), dynamic_ncols=True, mininterval=1.0)
     with gzip.open(tmp, "wt", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["split", "impression_id", "candidate_position", "news_id", "probability"])
@@ -133,6 +147,8 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
             for row, prob in zip(meta, probs):
                 writer.writerow([split, row["impression_id"], row["position"], row["news_id"], "{:.9g}".format(float(prob))])
             count += take
+            progress.update(take)
+    progress.close()
     os.replace(tmp, out_path)
     manifest = {"status": "LOCAL_PREDICTIONS_WRITTEN" if max_candidates is None else "PILOT_ONLY_PARTIAL_PREDICTIONS",
                 "full_split": max_candidates is None, "split": split,
@@ -235,4 +251,129 @@ def ensemble(inputs, output):
     manifest["output_bytes"] = out.stat().st_size
     manifest["output_sha256"] = file_sha256(out)
     Path(str(out) + ".manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
+
+
+def _prediction_sidecars(inputs):
+    sidecars = []
+    for value in inputs:
+        path = Path(value)
+        manifest_path = Path(str(path) + ".manifest.json")
+        if not path.is_file() or not manifest_path.is_file():
+            raise FileNotFoundError("prediction or manifest is missing: {}".format(path))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (manifest.get("status") != "LOCAL_PREDICTIONS_WRITTEN"
+                or not manifest.get("full_split")
+                or manifest.get("split") != "test"):
+            raise ValueError("submission requires completed full-test predictions: {}".format(path))
+        if manifest.get("output_sha256") != file_sha256(path):
+            raise ValueError("prediction checksum differs from its manifest: {}".format(path))
+        sidecars.append(manifest)
+    if len({m["checkpoint"]["sha256"] for m in sidecars}) != len(sidecars):
+        raise ValueError("submission inputs must use distinct checkpoints")
+    for key in ("model_contract_sha256", "input_artifact_fingerprint", "implementation_fingerprint"):
+        values = {json.dumps(m.get(key), sort_keys=True) for m in sidecars}
+        if len(values) != 1:
+            raise ValueError("submission inputs differ at {}".format(key))
+    return sidecars
+
+
+def submission(inputs, output, db_path=DEFAULT_DB):
+    """Create a deterministic CodaLab ZIP from one or more full-test predictions."""
+    if not inputs:
+        raise ValueError("submission requires at least one prediction input")
+    inputs = [Path(value) for value in inputs]
+    sidecars = _prediction_sidecars(inputs)
+    database = locked_artifacts(db_path)
+    expected_inputs = sidecars[0]["input_artifact_fingerprint"]
+    if database["fingerprint"] != expected_inputs:
+        raise ValueError("submission database/artifact fingerprint differs from prediction inputs")
+
+    readers = [_read_prediction(path) for path in inputs]
+    streams = [stream for stream, _ in readers]
+    iterators = [iter(reader) for _, reader in readers]
+    sentinels = [object() for _ in iterators]
+    conn = connect_readonly(db_path)
+    expected_rows = conn.execute("""
+      SELECT i.impression_id,c.position,n.news_id
+      FROM impressions i JOIN candidates c ON c.impression_id=i.id
+      LEFT JOIN news n ON n.did=c.did
+      WHERE i.split='test'
+      ORDER BY i.line_no,c.position
+    """)
+
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    text_path = output.parent / (output.name + ".prediction.txt.tmp")
+    impression_count = candidate_count = 0
+    current_impression = None
+    bucket = []
+
+    def write_bucket(stream, impression_id, rows):
+        nonlocal impression_count
+        if not rows:
+            return
+        stream.write(format_impression_line(impression_id, rows))
+        impression_count += 1
+
+    try:
+        with text_path.open("w", encoding="utf-8", newline="\n") as target:
+            for expected in expected_rows:
+                records = [next(iterator, sentinel)
+                           for iterator, sentinel in zip(iterators, sentinels)]
+                if any(record is sentinel for record, sentinel in zip(records, sentinels)):
+                    raise ValueError("prediction stream ended before the test candidate stream")
+                keys = [
+                    (record["split"], record["impression_id"],
+                     int(record["candidate_position"]), record["news_id"] or None)
+                    for record in records
+                ]
+                if any(key != keys[0] for key in keys[1:]):
+                    raise ValueError("prediction candidate key mismatch: {}".format(keys))
+                expected_key = ("test", str(expected[0]), int(expected[1]), expected[2])
+                if keys[0] != expected_key:
+                    raise ValueError("prediction order/key differs from raw test order: {} != {}".format(
+                        keys[0], expected_key))
+                probabilities = [float(record["probability"]) for record in records]
+                if not all(np.isfinite(probabilities)):
+                    raise ValueError("submission prediction contains non-finite probability")
+                impression_id = str(expected[0])
+                if current_impression is not None and impression_id != current_impression:
+                    write_bucket(target, current_impression, bucket)
+                    bucket = []
+                current_impression = impression_id
+                bucket.append((int(expected[1]), float(np.mean(probabilities))))
+                candidate_count += 1
+            if current_impression is not None:
+                write_bucket(target, current_impression, bucket)
+            leftovers = [next(iterator, sentinel)
+                         for iterator, sentinel in zip(iterators, sentinels)]
+            if any(record is not sentinel for record, sentinel in zip(leftovers, sentinels)):
+                raise ValueError("prediction stream contains rows beyond the test candidate stream")
+
+        write_submission_zip(text_path, output)
+    finally:
+        conn.close()
+        for stream in streams:
+            stream.close()
+        text_path.unlink(missing_ok=True)
+
+    manifest = {
+        "status": "CODALAB_MIND_SUBMISSION_READY",
+        "output": str(output),
+        "output_bytes": output.stat().st_size,
+        "output_sha256": file_sha256(output),
+        "archive_members": ["prediction.txt"],
+        "model_count": len(inputs),
+        "prediction_inputs": [str(path) for path in inputs],
+        "prediction_sha256": [file_sha256(path) for path in inputs],
+        "checkpoint_sha256": [manifest["checkpoint"]["sha256"] for manifest in sidecars],
+        "impressions": impression_count,
+        "candidates": candidate_count,
+        "rank_start": 1,
+        "rank_tie_break": "candidate_position ascending",
+        "database_identity": database["fingerprint"]["database"],
+    }
+    Path(str(output) + ".manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest

@@ -52,14 +52,14 @@
       "sha256": "95429e3d96aceafc152c3d983c0f9e9f329a3983c0c6ef9b91dab98fb6708914"
     },
     {
-      "bytes": 8674,
+      "bytes": 8834,
       "path": "mind_news_metadata/build_entity_matrix.py",
-      "sha256": "a9a5ea63bbf101d9fd31172ae78b637b6e5fa60c7d6af2b4b6c1b3f06d0d25fa"
+      "sha256": "11ff8eac5f7b4767afa78c8e1827b1c5e087190f421d94293b0284ca3c9e2188"
     },
     {
-      "bytes": 6989,
+      "bytes": 7138,
       "path": "mind_news_metadata/build_train_did_membership.py",
-      "sha256": "5977d9576e5568af876910475b6fb286dd79d04c6705f27b44cc5688c432ca85"
+      "sha256": "6b0085f76469742d30b333ed7915575718ba9d9ec713c83c989a63061d271ccb"
     },
     {
       "bytes": 5775,
@@ -82,9 +82,9 @@
       "sha256": "79c3a5cf835a9d81e6386ae375240a48b8054f0a0d268e45bd26f1410f4d6d93"
     },
     {
-      "bytes": 56290,
+      "bytes": 57852,
       "path": "mind_news_metadata/full_pipeline.py",
-      "sha256": "83dd6e66da76329e8f1fb35e18971f93b163f2c0cdf63a53182a5df370801005"
+      "sha256": "04c945e72e2e275edbdff81afab7f3814d6b2c1083f633534ed25211ad39faad"
     },
     {
       "bytes": 6871,
@@ -92,9 +92,9 @@
       "sha256": "296c579dce48f011265b99e9d681f71a2d3ed03aabb02580907d17d7d47180b4"
     },
     {
-      "bytes": 13495,
+      "bytes": 20375,
       "path": "mind_news_metadata/prediction.py",
-      "sha256": "c0171dd01e0a186d0a0742a6ee5f16f5e275c6bcd2cd87b88e3e7a31a18931fe"
+      "sha256": "e5af8384487fd9cccf52deb5cc974466c13d3605a0f25fcd8290603c03b25c0b"
     },
     {
       "bytes": 7773,
@@ -110,6 +110,11 @@
       "bytes": 7185,
       "path": "mind_news_metadata/recommendation_protocol.py",
       "sha256": "ef43126d40f9676ce82de695d952a52ae086bba7937f59049199f06bd790a2cd"
+    },
+    {
+      "bytes": 1926,
+      "path": "mind_news_metadata/submission_format.py",
+      "sha256": "be7f8c7a75c2e1d9e3a0a0bede11ba597bfe1f954e3f2b865bcf8a38fb8910bb"
     },
     {
       "bytes": 17010,
@@ -132,7 +137,7 @@
       "sha256": "cbdede30eae961029972d42f37cf49fb8872981c725034cbf29bb1626baa4895"
     }
   ],
-  "payload_sha256": "e5fa4d67e2e267c65293dc0975f4c9f2d73d7902140bd642ed0417906bc4bd8b",
+  "payload_sha256": "d4c1b37b5ba7a1f2d33da758de46356ac8f4e670cd01ba933d67320cef96cdc9",
   "schema_version": 1,
   "upstream_commit": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
   "variant": "mind_no_body_15field"

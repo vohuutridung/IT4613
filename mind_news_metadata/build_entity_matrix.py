@@ -40,10 +40,11 @@ def _read_vocab(path):
     return tokens
 
 
-def build(db_path, out_path, manifest_path, mapping_path, seed=None):
+def build(db_path, out_path, manifest_path, mapping_path, seed=None, data_root=None):
     seed = ARTIFACT_CONFIG.initialization_seed if seed is None else int(seed)
     db_path, out_path = Path(db_path), Path(out_path)
     manifest_path, mapping_path = Path(manifest_path), Path(mapping_path)
+    data_root = Path(data_root or ROOT / "data")
     tokens = _read_vocab(mapping_path)
     token_to_id = {token: i for i, token in enumerate(tokens)}
     if len(token_to_id) != len(tokens):
@@ -62,7 +63,7 @@ def build(db_path, out_path, manifest_path, mapping_path, seed=None):
     zero_norm_rows = 0
 
     for split in SPLITS:
-        path = ROOT / "data" / ("MINDlarge_" + split) / "entity_embedding.vec"
+        path = data_root / ("MINDlarge_" + split) / "entity_embedding.vec"
         expected = data_manifest["splits"]["MINDlarge_" + split]["files"]["entity_embedding.vec"]
         actual = {"bytes": path.stat().st_size, "sha256": sha256(path)}
         if actual["bytes"] != expected["bytes"] or actual["sha256"] != expected["sha256"]:
@@ -110,9 +111,9 @@ def build(db_path, out_path, manifest_path, mapping_path, seed=None):
       "method": "train->dev->test; first occurrence wins; per-vector L2 normalization, matching upstream src/tools/merge-entity-emb.py",
       "upstream_source_file": "upstream-mind/projects/ai/mind/src/tools/merge-entity-emb.py",
       "input_files": {
-        split: {"path": "data/MINDlarge_" + split + "/entity_embedding.vec",
-               "bytes": (ROOT / "data" / ("MINDlarge_" + split) / "entity_embedding.vec").stat().st_size,
-               "sha256": sha256(ROOT / "data" / ("MINDlarge_" + split) / "entity_embedding.vec"),
+        split: {"path": str(data_root / ("MINDlarge_" + split) / "entity_embedding.vec"),
+               "bytes": (data_root / ("MINDlarge_" + split) / "entity_embedding.vec").stat().st_size,
+               "sha256": sha256(data_root / ("MINDlarge_" + split) / "entity_embedding.vec"),
                "rows": input_rows[split]}
         for split in SPLITS
       },
@@ -165,8 +166,10 @@ def main():
     ap.add_argument("--manifest", default="artifacts/mind_large_prepared/embeddings/entity_matrix_manifest.json")
     ap.add_argument("--mapping", default="artifacts/mind_large_prepared/vocab/entity.tsv")
     ap.add_argument("--seed", type=int, default=ARTIFACT_CONFIG.initialization_seed)
+    ap.add_argument("--data-root", default="data")
     args = ap.parse_args()
-    print(json.dumps(build(args.db, args.out, args.manifest, args.mapping, args.seed), indent=2))
+    print(json.dumps(build(args.db, args.out, args.manifest, args.mapping,
+                           args.seed, args.data_root), indent=2))
 
 
 if __name__ == "__main__":

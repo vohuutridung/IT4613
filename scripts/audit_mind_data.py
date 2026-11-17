@@ -16,6 +16,8 @@ import resource
 import time
 from pathlib import Path
 
+from tqdm.auto import tqdm
+
 SPLITS = ("MINDlarge_train", "MINDlarge_dev", "MINDlarge_test")
 EXPECTED = {
     "behaviors.tsv": 5,
@@ -38,9 +40,12 @@ def digest_and_rows(path: Path, expected_columns: int) -> dict:
     embedding_dims: dict[str, int] = {}
     trailing_empty = 0
     started = time.monotonic()
-    with path.open("rb") as stream:
+    with path.open("rb") as stream, tqdm(
+            total=path.stat().st_size, desc="audit {}".format(path.name),
+            unit="B", unit_scale=True, dynamic_ncols=True, mininterval=1.0) as progress:
         for raw in stream:
             sha.update(raw)
+            progress.update(len(raw))
             rows += 1
             try:
                 line = raw.decode("utf-8").rstrip("\r\n")
