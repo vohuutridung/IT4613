@@ -18,6 +18,60 @@ from .full_pipeline import (DEFAULT_DB, ROOT, TRAINING_CONFIG, EXECUTION_CONFIG,
 from .submission_format import format_impression_line, write_submission_zip
 
 
+# The pre-graph prediction implementation used by existing trained runs. Only
+# this execution-file change is compatible; model/data/protocol hashes must
+# still match byte-for-byte. Retain both fingerprints in prediction provenance.
+_LEGACY_PREDICTION_SHA256 = "b6c74236027f9afdec8675926a22035cc589400b88cc6d885669d7fe6a5b836e"
+
+
+def validate_inference_implementation(saved, current):
+    if saved == current:
+        return
+    path = "mind_news_metadata/prediction.py"
+    if isinstance(saved, dict) and saved.get(path) == _LEGACY_PREDICTION_SHA256:
+        compatible = dict(saved)
+        compatible[path] = current.get(path)
+        if compatible == current:
+            return
+    raise ValueError("checkpoint source code fingerprint differs from current implementation")
+
+
+def make_predict_step(model, sample):
+    """One graph for all batch lengths, returning only candidate probabilities."""
+    signature = {key: tf.TensorSpec([None] + list(value.shape[1:]), tf.int32)
+                 for key, value in sample.items()}
+
+    @tf.function(input_signature=[signature])
+    def predict_step(features):
+        return model(features, training=False)["probabilities"]
+
+    predict_step.get_concrete_function()
+    # Encoder inspection attributes hold the most recent query/attention
+    # tensors. After tracing, the graph owns their lifetimes. Drop the Python
+    # references, including the eager tensors left by checkpoint warmup.
+    for layer in model.submodules:
+        if hasattr(layer, "last_queries"):
+            layer.last_queries.clear()
+        if hasattr(layer, "last_query"):
+            layer.last_query = None
+        if hasattr(layer, "last_weights"):
+            layer.last_weights = None
+    return predict_step
+
+
+def gpu_memory_snapshot(candidates, predict_step):
+    try:
+        memory = tf.config.experimental.get_memory_info("GPU:0")
+    except (ValueError, RuntimeError):
+        return None
+    snapshot = {"candidates": candidates,
+                "current_mib": round(memory["current"] / (1024 ** 2), 1),
+                "peak_mib": round(memory["peak"] / (1024 ** 2), 1),
+                "graph_traces": predict_step.experimental_get_tracing_count()}
+    print("[predict-memory] " + json.dumps(snapshot), flush=True)
+    return snapshot
+
+
 def file_sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -50,8 +104,9 @@ def load_run(run_dir, db_path=DEFAULT_DB):
     current_inputs = current_identity["fingerprint"]
     if config.get("config", {}).get("inputs") != current_inputs:
         raise ValueError("checkpoint input DB/mapping/artifact fingerprint differs from current files")
-    if config.get("config", {}).get("implementation_fingerprint") != implementation_fingerprint():
-        raise ValueError("checkpoint source code fingerprint differs from current implementation")
+    current_implementation = implementation_fingerprint()
+    validate_inference_implementation(
+        config.get("config", {}).get("implementation_fingerprint"), current_implementation)
     dynamic = {"effective_batch_size", "microbatch_size", "replicas", "precision", "train_step_xla"}
     for key, value in TRAINING_CONFIG.items():
         if key in dynamic:
@@ -73,6 +128,7 @@ def load_run(run_dir, db_path=DEFAULT_DB):
     status.assert_existing_objects_matched()
     status.expect_partial()  # optimizer slots are intentionally unused for inference
     config["current_database_location"] = current_identity["location"]
+    config["inference_implementation_fingerprint"] = current_implementation
     return model, store, prefix, config
 
 
@@ -107,6 +163,8 @@ def train_did_set(path, expected_database):
 def predict(run_dir, split="test", profile="test", train_dids_path=None,
             output=None, db_path=DEFAULT_DB,
             batch_size=EXECUTION_CONFIG.evaluation_batch_size, max_candidates=None):
+    if batch_size < 1:
+        raise ValueError("prediction batch size must be positive")
     model, store, prefix, run_config = load_run(run_dir, db_path)
     train_dids = (train_did_set(train_dids_path, run_config["config"]["inputs"]["database"])
                   if train_dids_path else None)
@@ -116,6 +174,9 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     count = 0
+    batches = 0
+    predict_step = None
+    first_memory = last_memory = None
     total_candidates = store.count_candidates(split)
     if max_candidates is not None:
         total_candidates = min(total_candidates, int(max_candidates))
@@ -136,13 +197,20 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
             if split != "test" and not bool(labels["labeled"].all()):
                 raise ValueError("labeled split contains unlabeled rows")
             features = _candidate_mask(features, meta, profile, train_dids)
-            probs = model(_to_tensors(features), training=False)["probabilities"].numpy()
+            if predict_step is None:
+                predict_step = make_predict_step(model, features)
+            probs = predict_step(_to_tensors(features)).numpy()
             if not np.isfinite(probs).all():
                 raise ValueError("non-finite probability")
             for row, prob in zip(meta, probs):
                 writer.writerow([split, row["impression_id"], row["position"], row["news_id"], "{:.9g}".format(float(prob))])
             count += take
+            batches += 1
             progress.update(take)
+            if batches == 1 or batches % 500 == 0:
+                last_memory = gpu_memory_snapshot(count, predict_step)
+                if batches == 1:
+                    first_memory = last_memory
     progress.close()
     os.replace(tmp, out_path)
     manifest = {"status": "LOCAL_PREDICTIONS_WRITTEN" if max_candidates is None else "PILOT_ONLY_PARTIAL_PREDICTIONS",
@@ -154,6 +222,9 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
                 "input_artifact_fingerprint": run_config["config"]["inputs"],
                 "database_location": run_config.get("current_database_location"),
                 "implementation_fingerprint": run_config["config"]["implementation_fingerprint"],
+                "inference_implementation_fingerprint": run_config["inference_implementation_fingerprint"],
+                "inference_execution": {"mode": "tf.function", "batch_size": batch_size,
+                                        "first_memory": first_memory, "last_memory": last_memory},
                 "field_order": list(TRAINING_CONFIG["field_order"]),
                 "output_bytes": out_path.stat().st_size,
                 "output_sha256": file_sha256(out_path),

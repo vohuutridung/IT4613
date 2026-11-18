@@ -107,9 +107,9 @@
       "sha256": "296c579dce48f011265b99e9d681f71a2d3ed03aabb02580907d17d7d47180b4"
     },
     {
-      "bytes": 20038,
+      "bytes": 23149,
       "path": "mind_news_metadata/prediction.py",
-      "sha256": "b6c74236027f9afdec8675926a22035cc589400b88cc6d885669d7fe6a5b836e"
+      "sha256": "22ec58646aae4891bcce7ac2d613b5b90df2a7d48592789c4e8c6053225e67db"
     },
     {
       "bytes": 7773,
@@ -157,7 +157,7 @@
       "sha256": "cbdede30eae961029972d42f37cf49fb8872981c725034cbf29bb1626baa4895"
     }
   ],
-  "payload_sha256": "ee6c10666c683a2df918850c6810e3c1be72e3990e6ecab6c120a6582604c5b8",
+  "payload_sha256": "b794aceb76f749eaba3408e51f9c4b934fbd49cc29b7910096a9798125305f50",
   "schema_version": 1,
   "upstream_commit": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
   "variant": "mind_no_body_15field"

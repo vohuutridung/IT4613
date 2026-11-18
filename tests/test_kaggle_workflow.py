@@ -87,11 +87,14 @@ class RunnerCliTest(unittest.TestCase):
         self.assertIn('"--replicas", "2"', default.stdout)
         self.assertIn('"--checkpoint-every", "250"', default.stdout)
         override = subprocess.run(command + ["--effective-batch", "2048", "--batch-size", "128",
+            "--max-impressions", "1000", "--max-updates", "5",
             "--precision", "float32", "--prefetch-batches", "0", "--train-step-xla"],
             cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(override.returncode, 0, override.stderr)
         self.assertIn('"--effective-batch", "2048"', override.stdout)
         self.assertIn('"--batch-size", "128"', override.stdout)
+        self.assertIn('"--max-impressions", "1000"', override.stdout)
+        self.assertIn('"--max-updates", "5"', override.stdout)
         self.assertIn('"--train-step-xla"', override.stdout)
         invalid = subprocess.run(command + ["--effective-batch", "1000"],
                                  cwd=ROOT, capture_output=True, text=True)

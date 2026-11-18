@@ -186,6 +186,7 @@ Tham số chính:
 - `--train-step-xla` / `--no-train-step-xla`: thử XLA cho forward/backward và accumulation; mặc định tắt.
 - `--seed`: random seed.
 - `--max-updates`: giới hạn update **và thay đổi LR horizon** để chạy thử.
+- `--max-impressions`: giới hạn số impressions train trước khi lấy candidates theo partition. Dùng cùng `--max-updates 5` để smoke test nhanh, gồm cả bước đếm partition. Số impressions khác số candidate examples.
 - `--stop-after-updates-this-run`: dừng sau N updates trong phiên, giữ nguyên LR horizon của cả epoch.
 - `--benchmark-updates`: số updates mỗi cấu hình khi `--mode benchmark`, mặc định `30`.
 - `--resume-run`: checkpoint run cần resume.

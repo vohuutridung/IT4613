@@ -49,6 +49,53 @@ class DistributedTrainingTest(unittest.TestCase):
     def tearDown(self):
         tf.keras.mixed_precision.set_global_policy("float32")
 
+    def test_inference_accepts_only_the_known_execution_migration(self):
+        from mind_news_metadata.prediction import (
+            _LEGACY_PREDICTION_SHA256, validate_inference_implementation)
+        path = "mind_news_metadata/prediction.py"
+        saved = {path: _LEGACY_PREDICTION_SHA256, "model.py": "original"}
+        current = {path: "updated", "model.py": "original"}
+        validate_inference_implementation(saved, current)
+        validate_inference_implementation(current, current)
+        for incompatible in (None, {path: "unknown", "model.py": "original"},
+                             {path: _LEGACY_PREDICTION_SHA256, "model.py": "changed"}):
+            with self.assertRaisesRegex(ValueError, "fingerprint"):
+                validate_inference_implementation(incompatible, current)
+
+    def test_prediction_graph_parity_single_trace_and_memory(self):
+        from test_kaggle_workflow import CompactStoreTest
+        from mind_news_metadata.compact_data import CompactNewsBatchStore
+        from mind_news_metadata.field_encoder import TitleAbstractMetadataEncoder
+        from mind_news_metadata.recommendation_model import NoBodyRecommendationModel
+        from mind_news_metadata.prediction import make_predict_step
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
+        with tempfile.TemporaryDirectory() as folder, tf.device(DEVICES[0]):
+            store = CompactNewsBatchStore(CompactStoreTest()._fixture(Path(folder)))
+            features, _, _ = store.batch("train", limit=3)
+            encoder = TitleAbstractMetadataEncoder(store.vocab_sizes(),
+                initialized_test_only=True, initializer_seed=12)
+            model = NoBodyRecommendationModel(encoder)
+            expected = model(features, training=False)["probabilities"].numpy()
+            step = make_predict_step(model, features)
+            self.assertEqual(dict(encoder.last_queries), {})
+            self.assertIsNone(encoder.entity_din.last_weights)
+            for count in (3, 1, 2, 3):
+                batch = {k: tf.convert_to_tensor(v[:count]) for k, v in features.items()}
+                np.testing.assert_allclose(step(batch).numpy(), expected[:count], rtol=2e-3, atol=2e-4)
+            self.assertEqual(step.experimental_get_tracing_count(), 1)
+            if os.environ.get("MIND_TEST_PREDICT_STRESS") == "1":
+                if not DEVICES[0].startswith("/GPU"):
+                    self.skipTest("prediction memory stress requires MIND_TEST_GPUS=1")
+                batch = {k: tf.convert_to_tensor(np.tile(v, (22,) + (1,) * (v.ndim - 1))[:64])
+                         for k, v in features.items()}
+                for _ in range(100):
+                    step(batch).numpy()
+                baseline = tf.config.experimental.get_memory_info("GPU:0")["current"]
+                for _ in range(6500):  # 416,000 candidates, beyond the observed OOM point
+                    step(batch).numpy()
+                final = tf.config.experimental.get_memory_info("GPU:0")["current"]
+                self.assertLess(final - baseline, 64 * 1024 ** 2)
+
     def build(self, replicas=2, precision="float32", xla=False):
         tf.keras.mixed_precision.set_global_policy(precision)
         strategy = tf.distribute.MirroredStrategy(devices=DEVICES[:replicas])

@@ -449,6 +449,8 @@ class Runner:
             command.append("--resume")
         if self.args.max_updates is not None:
             command.extend(["--max-updates", self.args.max_updates])
+        if self.args.max_impressions is not None:
+            command.extend(["--max-impressions", self.args.max_impressions])
         if self.args.stop_after_updates_this_run is not None:
             command.extend(["--stop-after-updates-this-run", self.args.stop_after_updates_this_run])
         self.command(command, stage="train-partition-{}".format(partition))
@@ -618,6 +620,8 @@ def parser():
                     default=TRAINING_CONFIG["train_step_xla"])
     ap.add_argument("--seed", type=int, default=20261110)
     ap.add_argument("--max-updates", type=int)
+    ap.add_argument("--max-impressions", type=int,
+                    help="limit train impressions for smoke tests, including partition counting")
     ap.add_argument("--stop-after-updates-this-run", type=int)
     ap.add_argument("--benchmark-updates", type=int, default=30)
     ap.add_argument("--resume-run")
@@ -636,6 +640,8 @@ def main():
     args = ap.parse_args()
     if args.predict_batch_size < 1:
         ap.error("--predict-batch-size must be positive")
+    if args.max_impressions is not None and args.max_impressions < 1:
+        ap.error("--max-impressions must be positive")
     if args.mode in ("train", "train-ensemble", "single", "benchmark"):
         from mind_news_metadata.training_runtime import batch_layout
         batch_layout(args.effective_batch, args.microbatch, args.replicas)
