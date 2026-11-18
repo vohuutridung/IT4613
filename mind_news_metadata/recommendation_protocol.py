@@ -42,6 +42,87 @@ def partition_for_impression(labels, positions, impression_id, partition,
     return chosen
 
 
+def _stored_impression_token(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        raw = value
+    else:
+        raw = bytes(value)
+    return raw.rstrip(b"\0").decode("utf-8")
+
+
+def count_partition_from_offsets(clicks, offsets, impression_tokens, selected_locals,
+                                 partition, base_seed, split="train", partitions=None,
+                                 progress=None):
+    """Count one negative partition from compact candidate offsets and clicks.
+
+    Positions are the dense candidate order ``0 .. n-1``. Reseeding one
+    RandomState matches ``RandomState(seed).permutation`` without rebuilding
+    the MT19937 object for every impression.
+    """
+    if partitions is None:
+        partitions = TRAINING_CONFIG["partition_count"]
+    if split != "train":
+        raise ValueError("negative partition sampling is train-only")
+    part = int(partition)
+    parts = int(partitions)
+    if not 0 <= part < parts:
+        raise ValueError("partition outside configured range")
+    clicks = np.asarray(clicks)
+    offsets = np.asarray(offsets, dtype=np.int64)
+    selected = np.asarray(selected_locals, dtype=np.int64)
+    if clicks.ndim != 1 or offsets.ndim != 1 or selected.ndim != 1:
+        raise ValueError("compact partition count expects 1D clicks, offsets, and selection")
+    if len(offsets) < 1 or int(offsets[0]) != 0 or int(offsets[-1]) != len(clicks):
+        raise ValueError("candidate offsets do not cover the click array")
+    if np.any(np.diff(offsets) < 0):
+        raise ValueError("candidate offsets must be nondecreasing")
+    n_impressions = len(offsets) - 1
+    if selected.size and (int(selected.min()) < 0 or int(selected.max()) >= n_impressions):
+        raise ValueError("selected impression is outside the compact split")
+    if selected.size > 1:
+        selected = np.sort(selected)
+    if progress is None:
+        progress = len(selected) >= 20000
+    positives = negatives = impression_count = 0
+    rng = np.random.RandomState(0)
+    seed = int(base_seed)
+    bar = None
+    if progress and len(selected):
+        try:
+            from tqdm.auto import tqdm
+        except ImportError:
+            tqdm = None
+        if tqdm is not None:
+            bar = tqdm(total=len(selected), desc="count train partition {}".format(part),
+                       unit="impression", mininterval=1.0, dynamic_ncols=True)
+    try:
+        for step, local in enumerate(selected, 1):
+            start = int(offsets[local])
+            stop = int(offsets[local + 1])
+            width = stop - start
+            if width:
+                group = clicks[start:stop]
+                if int(group.min()) < 0:
+                    raise ValueError("unlabeled candidate in train partition count")
+                if int(group.max()) > 1:
+                    raise ValueError("partition sampling requires binary labeled candidates")
+                token = _stored_impression_token(impression_tokens[int(local)])
+                rng.seed(stable_impression_seed(seed, split, token))
+                permuted = rng.permutation(width)
+                positives += int(group.sum(dtype=np.int64))
+                negatives += int(np.count_nonzero(
+                    (group == 0) & ((permuted % parts) == part)))
+                impression_count += 1
+            if bar is not None and (step % 20000 == 0 or step == len(selected)):
+                bar.update(step - bar.n)
+    finally:
+        if bar is not None:
+            bar.close()
+    return positives, negatives, impression_count
+
+
 def learning_rate_at(update, total_updates,
                      peak=TRAINING_CONFIG["learning_rate_peak"],
                      minimum=TRAINING_CONFIG["learning_rate_min"],

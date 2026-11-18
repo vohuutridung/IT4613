@@ -443,26 +443,39 @@ def count_partition_candidates(store, partition, seed=TRAINING_CONFIG["partition
     order = ids[rng.permutation(len(ids))]
     if max_impressions is not None:
         order = order[:int(max_impressions)]
-    positives = negatives = impression_count = 0
-    for start in range(0, len(order), int(impression_group)):
-        part_ids = order[start:start + int(impression_group)].tolist()
-        by_imp = store.candidate_groups("train", part_ids)
-        for iid in part_ids:
-            group = by_imp.get(iid)
-            if group is None:
-                continue
-            if len(group["click"]) == 0:
-                continue
-            if not bool(np.asarray(group["labeled"]).all()):
-                raise ValueError("unlabeled candidate in train partition count")
-            keep = partition_for_impression(
-                group["click"], group["positions"], group["impression_id"],
-                partition, partitions=TRAINING_CONFIG["partition_count"],
-                base_seed=seed, split="train")
-            selected = np.asarray(group["click"])[keep]
-            positives += sum(int(x) == 1 for x in selected)
-            negatives += sum(int(x) == 0 for x in selected)
-            impression_count += 1
+    if len(order) >= 20000:
+        print("counting selected train candidates for partition {} ({} impressions)".format(
+            int(partition), len(order)), flush=True)
+    counter = getattr(store, "count_selected_partition", None)
+    if counter is not None:
+        positives, negatives, impression_count = counter(order, partition, seed)
+    else:
+        positives = negatives = impression_count = 0
+        group_starts = range(0, len(order), int(impression_group))
+        if len(order) >= 20000:
+            group_count = (len(order) + int(impression_group) - 1) // int(impression_group)
+            group_starts = tqdm(
+                group_starts, total=group_count, desc="count train partition {}".format(int(partition)),
+                unit="group", mininterval=1.0, dynamic_ncols=True)
+        for start in group_starts:
+            part_ids = order[start:start + int(impression_group)].tolist()
+            by_imp = store.candidate_groups("train", part_ids)
+            for iid in part_ids:
+                group = by_imp.get(iid)
+                if group is None:
+                    continue
+                if len(group["click"]) == 0:
+                    continue
+                if not bool(np.asarray(group["labeled"]).all()):
+                    raise ValueError("unlabeled candidate in train partition count")
+                keep = partition_for_impression(
+                    group["click"], group["positions"], group["impression_id"],
+                    partition, partitions=TRAINING_CONFIG["partition_count"],
+                    base_seed=seed, split="train")
+                selected = np.asarray(group["click"])[keep]
+                positives += sum(int(x) == 1 for x in selected)
+                negatives += sum(int(x) == 0 for x in selected)
+                impression_count += 1
     return {"partition": int(partition), "impressions_with_candidates": impression_count,
             "positives": positives, "negatives": negatives,
             "selected_candidates": positives + negatives,

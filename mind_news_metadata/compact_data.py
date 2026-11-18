@@ -118,6 +118,23 @@ class CompactNewsBatchStore:
             }
         return result
 
+    def count_selected_partition(self, impression_ids, partition, seed, split="train"):
+        """Exact selected-candidate totals for one train negative partition."""
+        if split != "train":
+            raise ValueError("negative partition sampling is train-only")
+        from .recommendation_protocol import count_partition_from_offsets
+
+        data = self._split(split)
+        base = int(data["meta"]["impression_base"])
+        n_impressions = int(data["meta"]["impressions"])
+        selected = np.asarray(impression_ids, dtype=np.int64) - base
+        if selected.size and (int(selected.min()) < 0 or int(selected.max()) >= n_impressions):
+            raise ValueError("impression ID is outside {} compact split".format(split))
+        offsets = np.array(data["candidate_offsets"], dtype=np.int64, copy=True)
+        clicks = np.array(data["click"], dtype=np.int8, copy=True)
+        return count_partition_from_offsets(
+            clicks, offsets, data["impression_id"], selected, partition, seed, split=split)
+
     def iter_submission_keys(self, split="test"):
         data = self._split(split)
         for local in range(int(data["meta"]["impressions"])):

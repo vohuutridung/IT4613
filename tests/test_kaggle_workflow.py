@@ -13,7 +13,12 @@ from deployment.kaggle.runner import Runner
 from mind_data_pipeline.compact_preprocess import build_behaviors
 from mind_data_pipeline.preprocess import init_db, pack_ids
 from mind_news_metadata.batch_data import NewsBatchStore
+from mind_config import TRAINING_CONFIG
 from mind_news_metadata.compact_data import CompactNewsBatchStore
+from mind_news_metadata.recommendation_protocol import (
+    count_partition_from_offsets,
+    partition_for_impression,
+)
 from mind_news_metadata.submission_format import (
     format_impression_line,
     write_submission_zip,
@@ -266,6 +271,83 @@ class CompactStoreTest(unittest.TestCase):
             np.testing.assert_array_equal(candidates, [4, 3])
             np.testing.assert_array_equal(test_click, [-1])
             np.testing.assert_array_equal(membership, [2, 3, 4])
+
+    def test_compact_partition_count_matches_per_impression_sampling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = CompactNewsBatchStore(self._fixture(Path(temporary)))
+            ids = store.impression_ids("train")
+            groups = store.candidate_groups("train", ids)
+            seed = TRAINING_CONFIG["partition_base_seed"]
+            for partition in range(TRAINING_CONFIG["partition_count"]):
+                counted = store.count_selected_partition(ids, partition, seed)
+                positives = negatives = impressions = 0
+                for impression_id in ids:
+                    group = groups[int(impression_id)]
+                    keep = partition_for_impression(
+                        group["click"], group["positions"], group["impression_id"],
+                        partition, base_seed=seed, split="train")
+                    selected = group["click"][keep]
+                    positives += int(np.count_nonzero(selected == 1))
+                    negatives += int(np.count_nonzero(selected == 0))
+                    impressions += 1
+                self.assertEqual(counted, (positives, negatives, impressions))
+            with self.assertRaises(ValueError):
+                store.count_selected_partition([99], 0, seed)
+
+
+class PartitionCountTest(unittest.TestCase):
+    def test_offset_count_matches_partition_function(self):
+        rng = np.random.RandomState(20261110)
+        widths = rng.randint(0, 41, size=400)
+        widths[10] = 0
+        offsets = np.zeros(len(widths) + 1, np.int64)
+        offsets[1:] = np.cumsum(widths)
+        clicks = rng.randint(0, 2, size=int(offsets[-1])).astype(np.int8)
+        tokens = np.asarray(
+            ["imp-{}".format(i).encode("utf-8") for i in range(len(widths))], dtype="S32")
+        selected = rng.permutation(len(widths))[:250]
+        total_negatives = 0
+        for local in selected:
+            start, stop = int(offsets[local]), int(offsets[local + 1])
+            total_negatives += int(np.count_nonzero(clicks[start:stop] == 0))
+        counted_negatives = 0
+        positive_counts = []
+        for partition in range(5):
+            got = count_partition_from_offsets(
+                clicks, offsets, tokens, selected, partition, 20261110, progress=False)
+            positives = negatives = impressions = 0
+            for local in selected:
+                start, stop = int(offsets[local]), int(offsets[local + 1])
+                if start == stop:
+                    continue
+                labels = clicks[start:stop].astype(np.int64)
+                keep = partition_for_impression(
+                    labels, np.arange(stop - start),
+                    bytes(tokens[int(local)]).rstrip(b"\0").decode("utf-8"),
+                    partition, partitions=5, base_seed=20261110, split="train")
+                chosen = labels[keep]
+                positives += int(np.count_nonzero(chosen == 1))
+                negatives += int(np.count_nonzero(chosen == 0))
+                impressions += 1
+            self.assertEqual(got, (positives, negatives, impressions))
+            counted_negatives += negatives
+            positive_counts.append(positives)
+        self.assertEqual(counted_negatives, total_negatives)
+        self.assertEqual(len(set(positive_counts)), 1)
+
+    def test_offset_count_rejects_bad_inputs(self):
+        clicks = np.asarray([1, 0, -1], np.int8)
+        offsets = np.asarray([0, 3], np.int64)
+        tokens = np.asarray([b"9"], dtype="S32")
+        with self.assertRaisesRegex(ValueError, "unlabeled"):
+            count_partition_from_offsets(clicks, offsets, tokens, [0], 0, 1, progress=False)
+        clicks = np.asarray([1, 2], np.int8)
+        offsets = np.asarray([0, 2], np.int64)
+        with self.assertRaisesRegex(ValueError, "binary"):
+            count_partition_from_offsets(clicks, offsets, tokens, [0], 0, 1, progress=False)
+        with self.assertRaisesRegex(ValueError, "outside configured range"):
+            count_partition_from_offsets(
+                np.asarray([1, 0], np.int8), offsets, tokens, [0], 5, 1, progress=False)
 
 
 if __name__ == "__main__":
