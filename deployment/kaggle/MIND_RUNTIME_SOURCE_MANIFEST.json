@@ -97,9 +97,9 @@
       "sha256": "38564e207fcde301a18978b894afd057e83ed7e04767b33ad07030d9a9b7dd15"
     },
     {
-      "bytes": 59977,
+      "bytes": 60179,
       "path": "mind_news_metadata/full_pipeline.py",
-      "sha256": "ea9f2d613dee0975e0fcb21a7760c94a985457fcc2cedb3231eeedb1f6e12172"
+      "sha256": "6078cf8ee2341cfdb21dc3b686a5c625a4b21c172e57a5b9b6170e384e1ae58e"
     },
     {
       "bytes": 6871,
@@ -107,9 +107,9 @@
       "sha256": "296c579dce48f011265b99e9d681f71a2d3ed03aabb02580907d17d7d47180b4"
     },
     {
-      "bytes": 23149,
+      "bytes": 27741,
       "path": "mind_news_metadata/prediction.py",
-      "sha256": "22ec58646aae4891bcce7ac2d613b5b90df2a7d48592789c4e8c6053225e67db"
+      "sha256": "645c2825cfafe07e4e334cd46d71c862928f18bfde6cfa718bd746ebd0090827"
     },
     {
       "bytes": 7773,
@@ -157,7 +157,7 @@
       "sha256": "cbdede30eae961029972d42f37cf49fb8872981c725034cbf29bb1626baa4895"
     }
   ],
-  "payload_sha256": "b794aceb76f749eaba3408e51f9c4b934fbd49cc29b7910096a9798125305f50",
+  "payload_sha256": "0bfd1064bc953f8bebfdda89df56eb9fffed9b7117580b30acddbb8efed014e5",
   "schema_version": 1,
   "upstream_commit": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
   "variant": "mind_no_body_15field"

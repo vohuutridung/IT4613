@@ -51,12 +51,22 @@ class DistributedTrainingTest(unittest.TestCase):
 
     def test_inference_accepts_only_the_known_execution_migration(self):
         from mind_news_metadata.prediction import (
-            _LEGACY_PREDICTION_SHA256, validate_inference_implementation)
+            _LEGACY_PREDICTION_SHA256, _GRAPH_PREDICTION_SHA256,
+            _PRE_PARALLEL_PIPELINE_SHA256, validate_inference_implementation)
         path = "mind_news_metadata/prediction.py"
         saved = {path: _LEGACY_PREDICTION_SHA256, "model.py": "original"}
         current = {path: "updated", "model.py": "original"}
         validate_inference_implementation(saved, current)
         validate_inference_implementation(current, current)
+        pipeline = "mind_news_metadata/full_pipeline.py"
+        for prediction_hash in (_LEGACY_PREDICTION_SHA256, _GRAPH_PREDICTION_SHA256):
+            validate_inference_implementation(
+                {path: prediction_hash, pipeline: _PRE_PARALLEL_PIPELINE_SHA256, "model.py": "original"},
+                {path: "updated", pipeline: "parallel-predict-cli", "model.py": "original"})
+        with self.assertRaisesRegex(ValueError, "fingerprint"):
+            validate_inference_implementation(
+                {path: _GRAPH_PREDICTION_SHA256, pipeline: "unknown", "model.py": "original"},
+                {path: "updated", pipeline: "parallel-predict-cli", "model.py": "original"})
         for incompatible in (None, {path: "unknown", "model.py": "original"},
                              {path: _LEGACY_PREDICTION_SHA256, "model.py": "changed"}):
             with self.assertRaisesRegex(ValueError, "fingerprint"):
@@ -95,6 +105,44 @@ class DistributedTrainingTest(unittest.TestCase):
                     step(batch).numpy()
                 final = tf.config.experimental.get_memory_info("GPU:0")["current"]
                 self.assertLess(final - baseline, 64 * 1024 ** 2)
+
+    def test_parallel_prediction_preserves_order_and_short_batches(self):
+        from mind_news_metadata.prediction import ParallelPredictor, make_predict_step
+
+        class PredictModel(tf.keras.Model):
+            def __init__(self):
+                super().__init__()
+                self.head = tf.keras.layers.Dense(1, dtype="float32")
+
+            def call(self, features, training=False):
+                return {"probabilities": tf.squeeze(self.head(tf.cast(features["ids"], tf.float32)), -1)}
+
+        models = []
+        for device in DEVICES:
+            with tf.device(device):
+                model = PredictModel()
+                model({"ids": tf.zeros([1, 3], tf.int32)})
+                model.set_weights([np.asarray([[1], [10], [100]], np.float32), np.zeros(1, np.float32)])
+                models.append(model)
+        sample = {"ids": np.arange(24, dtype=np.int32).reshape(8, 3)}
+        with tf.device(DEVICES[0]):
+            reference = make_predict_step(models[0], sample)
+        with ParallelPredictor(models, DEVICES, sample) as parallel:
+            for count in (8, 7, 1, 3, 8):
+                features = {"ids": sample["ids"][:count]}
+                np.testing.assert_array_equal(parallel(features), reference(features).numpy())
+            self.assertEqual([step.experimental_get_tracing_count() for step in parallel.steps], [1, 1])
+            # The barrier requires both workers to be in forward concurrently.
+            # This catches a sequential implementation that joins too early.
+            from threading import Barrier
+            barrier = Barrier(2)
+            def concurrent_step(features):
+                barrier.wait(timeout=10)
+                return tf.cast(features["ids"][:, 0], tf.float32)
+            parallel.steps = [concurrent_step, concurrent_step]
+            np.testing.assert_array_equal(parallel(sample), sample["ids"][:, 0])
+        with self.assertRaises(RuntimeError):
+            parallel(sample)  # executor shutdown on context exit
 
     def build(self, replicas=2, precision="float32", xla=False):
         tf.keras.mixed_precision.set_global_policy(precision)

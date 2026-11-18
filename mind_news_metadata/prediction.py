@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -22,15 +24,22 @@ from .submission_format import format_impression_line, write_submission_zip
 # this execution-file change is compatible; model/data/protocol hashes must
 # still match byte-for-byte. Retain both fingerprints in prediction provenance.
 _LEGACY_PREDICTION_SHA256 = "b6c74236027f9afdec8675926a22035cc589400b88cc6d885669d7fe6a5b836e"
+_GRAPH_PREDICTION_SHA256 = "22ec58646aae4891bcce7ac2d613b5b90df2a7d48592789c4e8c6053225e67db"
+_PRE_PARALLEL_PIPELINE_SHA256 = "ea9f2d613dee0975e0fcb21a7760c94a985457fcc2cedb3231eeedb1f6e12172"
 
 
 def validate_inference_implementation(saved, current):
     if saved == current:
         return
     path = "mind_news_metadata/prediction.py"
-    if isinstance(saved, dict) and saved.get(path) == _LEGACY_PREDICTION_SHA256:
+    if isinstance(saved, dict) and saved.get(path) in (
+            _LEGACY_PREDICTION_SHA256, _GRAPH_PREDICTION_SHA256):
         compatible = dict(saved)
         compatible[path] = current.get(path)
+        pipeline = "mind_news_metadata/full_pipeline.py"
+        # This known pipeline revision differs only in the prediction CLI.
+        if saved.get(pipeline) == _PRE_PARALLEL_PIPELINE_SHA256:
+            compatible[pipeline] = current.get(pipeline)
         if compatible == current:
             return
     raise ValueError("checkpoint source code fingerprint differs from current implementation")
@@ -59,17 +68,82 @@ def make_predict_step(model, sample):
     return predict_step
 
 
-def gpu_memory_snapshot(candidates, predict_step):
+def gpu_memory_snapshot(candidates, predict_step, device="GPU:0"):
     try:
-        memory = tf.config.experimental.get_memory_info("GPU:0")
+        memory = tf.config.experimental.get_memory_info(device)
     except (ValueError, RuntimeError):
         return None
-    snapshot = {"candidates": candidates,
+    snapshot = {"device": device, "candidates": candidates,
                 "current_mib": round(memory["current"] / (1024 ** 2), 1),
                 "peak_mib": round(memory["peak"] / (1024 ** 2), 1),
                 "graph_traces": predict_step.experimental_get_tracing_count()}
     print("[predict-memory] " + json.dumps(snapshot), flush=True)
     return snapshot
+
+
+def prediction_devices(replicas):
+    if replicas < 1:
+        raise ValueError("prediction replica count must be positive")
+    gpus = tf.config.list_physical_devices("GPU")
+    if replicas == 1 and not gpus:
+        return ["/CPU:0"]
+    if len(gpus) < replicas:
+        raise ValueError("predict requested {} GPUs, TensorFlow sees {}; check "
+                         "CUDA_VISIBLE_DEVICES and the Kaggle accelerator".format(replicas, len(gpus)))
+    return ["/GPU:{}".format(index) for index in range(replicas)]
+
+
+class ParallelPredictor:
+    """Persistent graphs and workers, with one independent model per device.
+
+    NumPy features are split on the host. Workers transfer only their shard to
+    their device and synchronize their own probabilities. Results are joined
+    in input order, regardless of worker completion order.
+    """
+    def __init__(self, models, devices, sample):
+        if not models or len(models) != len(devices):
+            raise ValueError("each prediction device must have its own model")
+        self.devices = list(devices)
+        self.steps = []
+        for model, device in zip(models, devices):
+            with tf.device(device):
+                self.steps.append(make_predict_step(model, sample))
+        self.pool = (ThreadPoolExecutor(max_workers=len(devices), thread_name_prefix="mind-predict")
+                     if len(devices) > 1 else None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        if self.pool is not None:
+            self.pool.shutdown(wait=True, cancel_futures=True)
+
+    @staticmethod
+    def _forward(step, device, features):
+        with tf.device(device):
+            return step(_to_tensors(features)).numpy()
+
+    def __call__(self, features):
+        if self.pool is None:
+            return self._forward(self.steps[0], self.devices[0], features)
+        count = len(next(iter(features.values())))
+        width, extra = divmod(count, len(self.devices))
+        futures = []
+        start = 0
+        for index, (step, device) in enumerate(zip(self.steps, self.devices)):
+            stop = start + width + int(index < extra)
+            if stop > start:
+                shard = {key: value[start:stop] for key, value in features.items()}
+                futures.append(self.pool.submit(self._forward, step, device, shard))
+            start = stop
+        return np.concatenate([future.result() for future in futures])
+
+    def memory_snapshot(self, candidates):
+        snapshots = {device.lstrip("/"): gpu_memory_snapshot(candidates, step, device.lstrip("/"))
+                     for device, step in zip(self.devices, self.steps)}
+        if len(self.devices) == 1:
+            return next(iter(snapshots.values()))
+        return snapshots
 
 
 def file_sha256(path):
@@ -162,10 +236,24 @@ def train_did_set(path, expected_database):
 
 def predict(run_dir, split="test", profile="test", train_dids_path=None,
             output=None, db_path=DEFAULT_DB,
-            batch_size=EXECUTION_CONFIG.evaluation_batch_size, max_candidates=None):
+            batch_size=EXECUTION_CONFIG.evaluation_batch_size, max_candidates=None, replicas=1):
     if batch_size < 1:
         raise ValueError("prediction batch size must be positive")
-    model, store, prefix, run_config = load_run(run_dir, db_path)
+    if max_candidates is not None and max_candidates < 1:
+        raise ValueError("prediction candidate limit must be positive")
+    devices = prediction_devices(replicas)
+    models = []
+    for device in devices:
+        with tf.device(device):
+            model, replica_store, replica_prefix, replica_config = load_run(run_dir, db_path)
+        if not models:
+            store, prefix, run_config = replica_store, replica_prefix, replica_config
+        elif (replica_prefix != prefix or replica_config["config_sha256"] != run_config["config_sha256"]):
+            raise ValueError("checkpoint changed while loading prediction replicas")
+        models.append(model)
+    print(json.dumps({"prediction_devices": devices, "replicas": replicas,
+                      "global_batch_size": batch_size,
+                      "max_batch_size_per_device": (batch_size + replicas - 1) // replicas}), flush=True)
     train_dids = (train_did_set(train_dids_path, run_config["config"]["inputs"]["database"])
                   if train_dids_path else None)
     if split == "test" and profile == "test" and train_dids is None:
@@ -175,14 +263,14 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     count = 0
     batches = 0
-    predict_step = None
+    predictor = None
     first_memory = last_memory = None
     total_candidates = store.count_candidates(split)
     if max_candidates is not None:
         total_candidates = min(total_candidates, int(max_candidates))
     progress = tqdm(total=total_candidates, unit="candidate",
                     desc="predict {}".format(split), dynamic_ncols=True, mininterval=1.0)
-    with gzip.open(tmp, "wt", encoding="utf-8", newline="") as stream:
+    with ExitStack() as resources, gzip.open(tmp, "wt", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["split", "impression_id", "candidate_position", "news_id", "probability"])
         for features, labels, meta in iter_ordered_batches(store, split, batch_size):
@@ -197,9 +285,12 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
             if split != "test" and not bool(labels["labeled"].all()):
                 raise ValueError("labeled split contains unlabeled rows")
             features = _candidate_mask(features, meta, profile, train_dids)
-            if predict_step is None:
-                predict_step = make_predict_step(model, features)
-            probs = predict_step(_to_tensors(features)).numpy()
+            if predictor is None:
+                predictor = resources.enter_context(ParallelPredictor(models, devices, features))
+            probs = predictor(features)
+            if probs.shape != (take,):
+                raise ValueError("prediction returned {} probabilities for {} candidates".format(
+                    probs.shape, take))
             if not np.isfinite(probs).all():
                 raise ValueError("non-finite probability")
             for row, prob in zip(meta, probs):
@@ -208,7 +299,7 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
             batches += 1
             progress.update(take)
             if batches == 1 or batches % 500 == 0:
-                last_memory = gpu_memory_snapshot(count, predict_step)
+                last_memory = predictor.memory_snapshot(count)
                 if batches == 1:
                     first_memory = last_memory
     progress.close()
@@ -224,6 +315,8 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
                 "implementation_fingerprint": run_config["config"]["implementation_fingerprint"],
                 "inference_implementation_fingerprint": run_config["inference_implementation_fingerprint"],
                 "inference_execution": {"mode": "tf.function", "batch_size": batch_size,
+                                        "replicas": replicas, "devices": devices,
+                                        "batch_size_semantics": "global across prediction devices",
                                         "first_memory": first_memory, "last_memory": last_memory},
                 "field_order": list(TRAINING_CONFIG["field_order"]),
                 "output_bytes": out_path.stat().st_size,

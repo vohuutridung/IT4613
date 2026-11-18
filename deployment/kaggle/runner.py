@@ -478,6 +478,7 @@ class Runner:
                     "--db", CANONICAL_PREPARED,
                     "--split", "test", "--profile", "test",
                     "--batch-size", self.args.predict_batch_size,
+                    "--replicas", self.args.predict_replicas,
                     "--train-dids", membership, "--output", output,
                     *limit_args,
                     stage="predict-test-model-{}".format(index))
@@ -622,7 +623,9 @@ def parser():
     ap.add_argument("--batch-size", "--microbatch", dest="microbatch", type=int,
                     default=TRAINING_CONFIG["microbatch_size"], help="microbatch size per GPU")
     ap.add_argument("--predict-batch-size", type=int, default=DEFAULT_PREDICT_BATCH_SIZE,
-                    help="test inference batch size for single, submit and ensemble-submit (default: 128)")
+                    help="global test inference batch size across prediction GPUs (default: 128)")
+    ap.add_argument("--predict-replicas", type=int, default=1,
+                    help="number of GPUs running the same checkpoint in parallel (default: 1)")
     ap.add_argument("--predict-max-candidates", type=int,
                     help="smoke predict at most N candidates per model and finish before ZIP creation")
     ap.add_argument("--replicas", type=int, default=TRAINING_CONFIG["replicas"])
@@ -653,6 +656,8 @@ def main():
     args = ap.parse_args()
     if args.predict_batch_size < 1:
         ap.error("--predict-batch-size must be positive")
+    if args.predict_replicas < 1:
+        ap.error("--predict-replicas must be positive")
     if args.predict_max_candidates is not None and args.predict_max_candidates < 1:
         ap.error("--predict-max-candidates must be positive")
     if args.max_impressions is not None and args.max_impressions < 1:

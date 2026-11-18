@@ -178,7 +178,8 @@ Tham số chính:
 - `--partition`: partition `0..4`.
 - `--effective-batch`: effective batch size.
 - `--batch-size` (alias `--microbatch`): microbatch **trên mỗi GPU**, mặc định `64`.
-- `--predict-batch-size`: batch dự đoán test cho `single`, `submit` và `ensemble-submit`, mặc định `128`. Nếu vẫn hết VRAM, thử `64`.
+- `--predict-batch-size`: batch dự đoán **tổng trên các GPU**, mặc định `128`. Ví dụ batch `512` với hai GPU chia thành khoảng `256` candidates/GPU.
+- `--predict-replicas`: số GPU cùng dự đoán từ một checkpoint, mặc định `1`. Chọn `2` để dùng cả hai T4. Mỗi GPU có model và graph riêng, hai worker chạy đồng thời rồi ghép probabilities đúng thứ tự đầu vào. `--replicas` vẫn điều khiển training.
 - `--predict-max-candidates`: giới hạn số candidates mỗi model để smoke test predict, ví dụ `500000`. Dùng được với `--mode submit`, `single`, `ensemble-submit`. Kết quả ghi vào `predictions/model-0-test-smoke.csv.gz` (index tương ứng cho ensemble) rồi kết thúc trước bước tạo ZIP. Có thể dùng checkpoint smoke. Bỏ cờ này để chạy toàn bộ tập test và tạo submission.
 - `--replicas`: số GPU cùng train một model, mặc định `2`; thiếu GPU sẽ báo lỗi.
 - `--precision`: `mixed_float16` (mặc định) hoặc `float32`.
@@ -197,6 +198,27 @@ Tham số chính:
 - `--allow-partial`: cho phép dùng partial run.
 - `--allow-cpu`: không bắt buộc GPU.
 - `--dry-run`: chỉ in kế hoạch.
+
+Smoke test predict song song trên hai T4:
+
+```bash
+bash deployment/kaggle/run.sh \
+  --mode submit \
+  --prepared-root /kaggle/input/CHANGE_ME_PREPARED/prepared \
+  --partition 0 \
+  --predict-replicas 2 \
+  --predict-batch-size 512 \
+  --predict-max-candidates 500000 \
+  --work-root /kaggle/working/mind15
+```
+
+Cho phép nhìn thấy cả hai GPU (`CUDA_VISIBLE_DEVICES=0,1`, mặc định của `run.sh`).
+Thiếu GPU được báo lỗi trước khi đọc checkpoint. Bỏ `--predict-max-candidates` để
+dự đoán toàn bộ tập test và tạo ZIP. Batch cuối lẻ được chia thành các phần có
+kích thước chênh nhau tối đa một candidate, và mọi candidate giữ nguyên vị trí
+trong CSV. Log `[predict-memory]` và `inference_execution` có thông tin từng GPU.
+Checkpoint từ phiên bản eager và graph trước đây dùng được khi chỉ khác các
+phiên bản execution/CLI đã biết, các hash model/data/protocol còn lại vẫn phải khớp.
 
 ## Config mặc định
 

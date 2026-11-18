@@ -76,11 +76,13 @@ class RunnerCliTest(unittest.TestCase):
                 predict = stages[0]["command"]
                 self.assertEqual(predict[predict.index("--run-dir") + 1], str(run_dir.resolve()))
                 self.assertEqual(predict[predict.index("--batch-size") + 1], expected_batch)
+                self.assertEqual(predict[predict.index("--replicas") + 1], "1")
 
             # A bounded smoke prediction accepts a smoke checkpoint and never
             # overwrites the full-test CSV or attempts to package a partial ZIP.
             progress.write_text('{"full_epoch": false}', encoding="utf-8")
             limited = subprocess.run(command + ["--predict-batch-size", "64",
+                "--predict-replicas", "2",
                 "--predict-max-candidates", "500000"], cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(limited.returncode, 0, limited.stderr)
             events = [json.loads(line.split(" ", 1)[1]) for line in limited.stdout.splitlines()]
@@ -88,6 +90,7 @@ class RunnerCliTest(unittest.TestCase):
             predict = events[0]["command"]
             self.assertEqual(predict[predict.index("--max-candidates") + 1], "500000")
             self.assertEqual(predict[predict.index("--batch-size") + 1], "64")
+            self.assertEqual(predict[predict.index("--replicas") + 1], "2")
             self.assertTrue(predict[predict.index("--output") + 1].endswith("model-0-test-smoke.csv.gz"))
             self.assertFalse(events[1]["submission_created"])
             self.assertFalse(events[1]["full_split"])
@@ -95,6 +98,10 @@ class RunnerCliTest(unittest.TestCase):
                                      cwd=ROOT, capture_output=True, text=True)
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("must be positive", invalid.stderr)
+            invalid_replicas = subprocess.run(command + ["--predict-replicas", "0"],
+                                             cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(invalid_replicas.returncode, 0)
+            self.assertIn("--predict-replicas must be positive", invalid_replicas.stderr)
 
     def test_training_defaults_and_overrides_reach_worker(self):
         command = [sys.executable, str(ROOT / "deployment/kaggle/runner.py"),

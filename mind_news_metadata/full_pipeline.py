@@ -1008,6 +1008,8 @@ def main():
     pr.add_argument("--split", default="test", choices=("dev", "test")); pr.add_argument("--profile")
     pr.add_argument("--train-dids"); pr.add_argument("--output"); pr.add_argument("--batch-size", type=int, default=EXECUTION_CONFIG.evaluation_batch_size)
     pr.add_argument("--max-candidates", type=int)
+    pr.add_argument("--replicas", type=int, default=1,
+                    help="GPU replicas for prediction; batch-size is global across devices")
     en = sub.add_parser("ensemble")
     en.add_argument("--inputs", nargs="+", required=True); en.add_argument("--output", required=True)
     su = sub.add_parser("submit")
@@ -1046,7 +1048,8 @@ def main():
         from .prediction import predict
         profile = a.profile or ("test" if a.split == "test" else "dev_raw")
         print(json.dumps(predict(a.run_dir, a.split, profile, a.train_dids,
-                                 a.output, a.db, a.batch_size, a.max_candidates), indent=2))
+                                 a.output, a.db, a.batch_size, a.max_candidates,
+                                 replicas=a.replicas), indent=2))
     elif a.command == "ensemble":
         from .prediction import ensemble
         print(json.dumps(ensemble(a.inputs, a.output), indent=2))
