@@ -23,7 +23,7 @@ class FieldInteraction(tf.keras.layers.Layer):
     PAIRS = _FIELD_PAIRS
 
     def call(self, fields):
-        stacked = tf.stack(fields, axis=1)  # [B, 15, 100], contract order supplied by caller
+        stacked = tf.cast(tf.stack(fields, axis=1), tf.float32)  # [B, 15, 100]
         flat = tf.reshape(stacked, [tf.shape(stacked)[0], self.FIELD_COUNT * self.WIDTH])
         dots = tf.stack([
             tf.reduce_sum(stacked[:, i, :] * stacked[:, j, :], axis=-1)
@@ -53,7 +53,7 @@ class NoBodyRecommendationModel(tf.keras.Model):
             for width in TRAINING_CONFIG["mlp_widths"]
         ]
         self.logit_layer = tf.keras.layers.Dense(
-            1, name="click_logit",
+            1, name="click_logit", dtype="float32",
             kernel_initializer=TRAINING_CONFIG["dense_kernel_initializer"],
             bias_initializer=TRAINING_CONFIG["dense_bias_initializer"],
             trainable=TRAINING_CONFIG["embedding_trainable"]["mlp"])

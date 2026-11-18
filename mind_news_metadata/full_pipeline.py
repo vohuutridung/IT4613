@@ -18,6 +18,8 @@ from .batch_data import connect_readonly, make_batch_store
 from .field_encoder import (TitleAbstractMetadataEncoder, load_glove_artifact,
                             load_pretrained_matrix, sha256_file)
 from .recommendation_model import NoBodyRecommendationModel, pointwise_bce_sum
+from .training_runtime import batch_layout, effective_batches, prefetch_batches
+from .distributed_training import DistributedTrainer, make_strategy
 from .recommendation_protocol import (aggregate_impression_metrics,
                                       learning_rate_at, partition_for_impression)
 from mind_config import ENCODER_CONFIG, EXECUTION_CONFIG, TRAINING_CONFIG
@@ -46,6 +48,7 @@ def implementation_fingerprint():
     paths = ["mind_config.py", "configs/mind_no_body_15field.json",
              "mind_data_pipeline/config.py", "mind_news_metadata/batch_data.py",
              "mind_news_metadata/compact_data.py",
+             "mind_news_metadata/training_runtime.py", "mind_news_metadata/distributed_training.py",
              "mind_news_metadata/encoder_config.py",
              "mind_news_metadata/field_encoder.py", "mind_news_metadata/recommendation_model.py",
              "mind_news_metadata/recommendation_protocol.py", "mind_news_metadata/full_pipeline.py",
@@ -539,9 +542,22 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
               effective_batch=TRAINING_CONFIG["effective_batch_size"],
               microbatch=TRAINING_CONFIG["microbatch_size"],
               max_updates=None, seed=TRAINING_CONFIG["partition_base_seed"], resume=False, output_dir=None,
-              db_path=DEFAULT_DB, stop_after_updates_this_run=None):
-    if effective_batch < 1 or microbatch < 1:
-        raise ValueError("batch sizes must be positive")
+              db_path=DEFAULT_DB, stop_after_updates_this_run=None,
+              replicas=TRAINING_CONFIG["replicas"], precision=TRAINING_CONFIG["precision"],
+              prefetch=EXECUTION_CONFIG.prefetch_batches,
+              checkpoint_every=EXECUTION_CONFIG.checkpoint_every_updates,
+              train_step_xla=TRAINING_CONFIG["train_step_xla"], allow_cpu=False):
+    layout = batch_layout(effective_batch, microbatch, replicas)
+    if precision not in ("float32", "mixed_float16"):
+        raise ValueError("unsupported precision")
+    if checkpoint_every < 1 or prefetch < 0:
+        raise ValueError("checkpoint interval must be positive and prefetch nonnegative")
+    if max_updates is not None and max_updates < 1:
+        raise ValueError("max-updates must be positive")
+    if stop_after_updates_this_run is not None and stop_after_updates_this_run < 1:
+        raise ValueError("stop-after-updates-this-run must be positive")
+    strategy = make_strategy(replicas, allow_cpu=allow_cpu)
+    tf.keras.mixed_precision.set_global_policy(precision)
     tf.keras.utils.set_random_seed(seed)
     # Fingerprint the caller path before resolving symlinks so an overlay
     # manifest beside a read-only Kaggle DB link remains discoverable.
@@ -550,25 +566,29 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
     locked = input_identity["fingerprint"]
     database_location = input_identity["location"]
     db_path = requested_db_path.resolve(strict=True)
-    model, store, word_manifest = make_model(db_path)
-    if Path(store.db_path).resolve(strict=True) != db_path:
-        raise ValueError("model loader opened a different database than the fingerprinted DB")
-    first = store.batch("train", limit=min(2, effective_batch))
-    if first[0] is None:
-        raise ValueError("training DB is empty")
-    model(_to_tensors(first[0]), training=False)
-    optimizer = tf.keras.optimizers.Adam(
-        learning_rate=TRAINING_CONFIG["learning_rate_peak"],
-        beta_1=TRAINING_CONFIG["beta_1"], beta_2=TRAINING_CONFIG["beta_2"],
-        epsilon=TRAINING_CONFIG["epsilon"],
-        weight_decay=TRAINING_CONFIG["weight_decay"],
-        amsgrad=TRAINING_CONFIG["amsgrad"],
-        clipnorm=TRAINING_CONFIG["clipnorm"],
-        clipvalue=TRAINING_CONFIG["clipvalue"],
-        global_clipnorm=TRAINING_CONFIG["global_clipnorm"],
-        use_ema=TRAINING_CONFIG["use_ema"],
-        jit_compile=TRAINING_CONFIG["jit_compile"],
-        name="adam_reimplementation")
+    with strategy.scope():
+        model, store, word_manifest = make_model(db_path)
+        if Path(store.db_path).resolve(strict=True) != db_path:
+            raise ValueError("model loader opened a different database than the fingerprinted DB")
+        first = store.batch("train", limit=min(2, effective_batch))
+        if first[0] is None:
+            raise ValueError("training DB is empty")
+        model(_to_tensors(first[0]), training=False)
+        optimizer = tf.keras.optimizers.Adam(
+            learning_rate=TRAINING_CONFIG["learning_rate_peak"],
+            beta_1=TRAINING_CONFIG["beta_1"], beta_2=TRAINING_CONFIG["beta_2"],
+            epsilon=TRAINING_CONFIG["epsilon"],
+            weight_decay=TRAINING_CONFIG["weight_decay"],
+            amsgrad=TRAINING_CONFIG["amsgrad"],
+            clipnorm=TRAINING_CONFIG["clipnorm"],
+            clipvalue=TRAINING_CONFIG["clipvalue"],
+            global_clipnorm=TRAINING_CONFIG["global_clipnorm"],
+            use_ema=TRAINING_CONFIG["use_ema"],
+            jit_compile=TRAINING_CONFIG["jit_compile"],
+            name="adam_reimplementation")
+        optimizer.build(model.trainable_variables)
+    trainer = DistributedTrainer(strategy, model, optimizer, effective_batch, microbatch,
+                                 precision=precision, xla=train_step_xla)
     out_dir = Path(output_dir or DEFAULT_OUT / "partition-{}".format(partition))
     count_path = out_dir / "partition_counts.json"
     config_path = out_dir / "run_config.json"
@@ -581,6 +601,8 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
         request = {
             "partition": int(partition), "seed": int(seed),
             "effective_batch_size": int(effective_batch), "microbatch_size": int(microbatch),
+            "replicas": int(replicas), "precision": precision, "train_step_xla": bool(train_step_xla),
+            "prefetch_batches": int(prefetch), "checkpoint_every_updates": int(checkpoint_every),
             "max_impressions": max_impressions, "max_updates": max_updates,
             "inputs": locked, "word_matrix_sha256": word_manifest["matrix_sha256"],
         }
@@ -617,6 +639,10 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
                      max(1, int(np.ceil(count["selected_candidates"] / float(effective_batch)))))
     run_config = dict(TRAINING_CONFIG, partition=int(partition), seed=int(seed),
                       effective_batch_size=int(effective_batch), microbatch_size=int(microbatch),
+                      replicas=int(replicas), precision=precision, train_step_xla=bool(train_step_xla),
+                      gradient_accumulation_steps=layout["gradient_accumulation_steps"],
+                      global_microbatch_size=layout["global_microbatch_size"],
+                      prefetch_batches=int(prefetch), checkpoint_every_updates=int(checkpoint_every),
                       word_matrix_sha256=word_manifest["matrix_sha256"],
                       inputs=locked, max_impressions=max_impressions,
                       max_updates=max_updates, exact_partition_counts=count,
@@ -630,7 +656,7 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
                           "partition_count": int(TRAINING_CONFIG["partition_count"]),
                           "partition_seed": int(seed),
                       },
-                      checkpoint_state_schema_version=2,
+                      checkpoint_state_schema_version=3,
                       schedule_state_contract={
                           "checkpoint_schedule_index": "zero-based index of the next optimizer update",
                           "lr_assignment": "learning_rate_at(schedule_index) before apply_gradients",
@@ -652,10 +678,10 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
                                           "database_location_at_creation": database_location},
                                           indent=2, sort_keys=True) + "\n")
         temp_config.replace(config_path)
-    optimizer.build(model.trainable_variables)
     (ckpt, manager, update_var, examples_var, sampling_cursor_var,
      last_candidate_key_var, schedule_var) = make_checkpoint(
         model, optimizer, 0, 0, 0, "", out_dir)
+    ckpt.loss_scale = trainer.loss_scale
     if resume:
         if not manager.latest_checkpoint:
             raise ValueError("cannot resume: no checkpoint found")
@@ -750,211 +776,115 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
             raise ValueError("cannot resume: saved candidate cursor key is malformed") from exc
         if saved_key_object.get("split") != "train":
             raise ValueError("cannot resume: saved candidate cursor key is not from train")
-    replay_remaining = sampling_cursor if resume else 0
-    replay_last_candidate_key = None
     examples_at_start = examples_seen
     last_candidate_key = saved_last_candidate_key
-    pending = 0
-    accumulated_count = 0
-    accum = [None] * len(model.trainable_variables)
-    groups = (iter_train_batches(store, partition, seed, max_impressions=max_impressions)
-              if update < total_updates or (resume and replay_remaining > 0) else ())
-    examples = 0
-    updates_this_run = 0
+    examples = updates_this_run = 0
     loss_sum = 0.0
     last_effective_loss = None
-    loss_parts = []
     label_counts = [0, 0]
-    profile = {"trace_seconds": 0.0, "data_batch_wait_seconds": 0.0, "tensor_conversion_seconds": 0.0,
-               "gradient_dispatch_seconds": 0.0, "gradient_accumulation_dispatch_seconds": 0.0,
-               "optimizer_apply_dispatch_seconds": 0.0,
-               "device_sync_and_loss_read_seconds": 0.0,
-               "checkpoint_save_seconds": 0.0,
-               "gradient_calls": 0, "first_gradient_dispatch_seconds": None}
+    profile = {"data_batch_wait_seconds": 0.0, "train_step_seconds": 0.0,
+               "checkpoint_save_seconds": 0.0, "first_train_step_seconds": None,
+               "benchmark_warmup_updates": 5, "steady_state_updates": 0,
+               "steady_state_candidates": 0, "steady_state_seconds": 0.0}
 
-    # The model/optimizer variables are built before tracing. This keeps Python
-    # dispatch out of the per-microbatch hot path; the math and effective batch
-    # accumulation remain unchanged.
-    feature_signature = {
-        key: tf.TensorSpec([None] + list(value.shape[1:]), tf.int32, name=key)
-        for key, value in first[0].items()
-    }
-
-    @tf.function(input_signature=[feature_signature,
-                                  tf.TensorSpec([None], tf.float32, name="labels")])
-    def compute_gradients(batch_features, batch_labels):
-        with tf.GradientTape() as tape:
-            output = model(batch_features, training=True)
-            batch_loss = pointwise_bce_sum(batch_labels, output["logits"])
-        batch_grads = tape.gradient(batch_loss, model.trainable_variables)
-        return batch_loss, batch_grads
-
-    trace_started = time.perf_counter()
-    compute_gradients.get_concrete_function()
-    profile["trace_seconds"] = time.perf_counter() - trace_started
-    start_time = time.time()
-    progress = tqdm(total=total_updates, initial=update, unit="update",
-                    desc="train partition {}".format(partition), dynamic_ncols=True,
-                    mininterval=1.0)
-
-    def apply_accumulated():
-        nonlocal update, schedule_index, pending, accumulated_count, accum
-        nonlocal updates_this_run, loss_sum, loss_parts, last_effective_loss
-        if accumulated_count == 0:
+    def remaining_groups():
+        replay = sampling_cursor if resume else 0
+        replay_key = None
+        if update >= total_updates and not replay:
             return
-        if schedule_index != update:
-            raise ValueError("schedule cursor diverged from optimizer update before optimizer step")
-        # Tiny runs use an explicit finite update horizon; full runs use the
-        # source-guided one-epoch cosine-free warmup/linear schedule.
-        lr = learning_rate_at(
-            min(update, total_updates - 1), total_updates,
-            peak=TRAINING_CONFIG["learning_rate_peak"],
-            minimum=TRAINING_CONFIG["learning_rate_min"],
-            warmup_fraction=TRAINING_CONFIG["warmup_fraction"])
-        optimizer.learning_rate.assign(lr)
-        grads = []
-        for grad, var in zip(accum, model.trainable_variables):
-            if grad is None:
-                grads.append((None, var))
-            elif isinstance(grad, list):
-                idx = tf.concat([g.indices for g in grad], 0)
-                val = tf.concat([g.values for g in grad], 0) / float(accumulated_count)
-                grads.append((tf.IndexedSlices(val, idx, grad[0].dense_shape), var))
-            else:
-                grads.append((grad / float(accumulated_count), var))
-        apply_started = time.perf_counter()
-        optimizer.apply_gradients((g, v) for g, v in grads if g is not None)
-        profile["optimizer_apply_dispatch_seconds"] += time.perf_counter() - apply_started
-        if int(optimizer.iterations.numpy()) != update + 1:
-            raise ValueError("optimizer iteration did not advance exactly once for the effective batch")
-        # Avoid synchronizing the GPU once per microbatch. Read the scalar loss
-        # once at the effective-batch boundary; this wait also accounts for
-        # outstanding device work rather than timing only asynchronous enqueue.
-        sync_started = time.perf_counter()
-        if loss_parts:
-            loss_values = np.asarray(tf.stack(loss_parts).numpy(), dtype=np.float64)
-            effective_loss_sum = float(loss_values.sum(dtype=np.float64))
-            loss_sum += effective_loss_sum
-            last_effective_loss = effective_loss_sum / float(accumulated_count)
-        profile["device_sync_and_loss_read_seconds"] += time.perf_counter() - sync_started
-        loss_parts = []
-        update += 1
-        schedule_index = update
-        update_var.assign(update)
-        schedule_var.assign(schedule_index)
-        examples_var.assign(examples_at_start + examples)
-        sampling_cursor_var.assign(examples_at_start + examples)
-        last_candidate_key_var.assign(last_candidate_key)
-        updates_this_run += 1
-        pending = 0
-        accumulated_count = 0
-        accum = [None] * len(model.trainable_variables)
-        if update % EXECUTION_CONFIG.checkpoint_every_updates == 0:
-            save_started = time.perf_counter()
-            manager.save(checkpoint_number=update)
-            profile["checkpoint_save_seconds"] += time.perf_counter() - save_started
-        progress.update(1)
-        progress.set_postfix(
-            loss="{:.5f}".format(last_effective_loss) if last_effective_loss is not None else "n/a",
-            lr="{:.3g}".format(lr),
-            examples=int(examples_at_start + examples),
-            ex_s="{:.1f}".format(examples / max(time.time() - start_time, 1e-9)),
-            ckpt=Path(manager.latest_checkpoint).name if manager.latest_checkpoint else "-",
-            refresh=False)
-
-    group_iter = iter(groups)
-    while True:
-        fetch_started = time.perf_counter()
-        try:
-            features, labels, metadata = next(group_iter)
-        except StopIteration:
-            profile["data_batch_wait_seconds"] += time.perf_counter() - fetch_started
-            break
-        profile["data_batch_wait_seconds"] += time.perf_counter() - fetch_started
-        if not bool(labels["labeled"].all()):
-            raise ValueError("train iterator returned unlabeled rows")
-        y = labels["click"].astype(np.float32)
-        if metadata is None or len(metadata) != len(y):
-            raise ValueError("training candidate metadata is not aligned with labels")
-        if replay_remaining:
-            skipped = min(replay_remaining, len(y))
-            if skipped:
-                replay_last_candidate_key = _candidate_cursor_key(metadata[skipped - 1])
-            replay_remaining -= skipped
-            if replay_remaining == 0 and sampling_cursor > 0:
-                if replay_last_candidate_key != saved_last_candidate_key:
-                    raise ValueError(
-                        "cannot resume: deterministic replay reached a different candidate key "
-                        "at the saved sampling cursor")
-            if skipped == len(y):
-                continue
-            features = {k: v[skipped:] for k, v in features.items()}
-            y = y[skipped:]
-            metadata = metadata[skipped:]
-        convert_started = time.perf_counter()
-        x = _to_tensors(features)
-        profile["tensor_conversion_seconds"] += time.perf_counter() - convert_started
-        stop_training = False
-        for begin in range(0, len(y), microbatch):
-            end = min(begin + microbatch, len(y))
-            cursor = begin
-            while cursor < end:
-                # Split at the optimizer boundary when an impression-group
-                # tail would otherwise make the effective batch overshoot.
-                take = min(end - cursor, effective_batch - pending)
-                stop = cursor + take
-                batch_x = _slice_features(x, cursor, stop)
-                batch_y = tf.convert_to_tensor(y[cursor:stop], dtype=tf.float32)
-                compute_started = time.perf_counter()
-                loss, grads = compute_gradients(batch_x, batch_y)
-                call_elapsed = time.perf_counter() - compute_started
-                if profile["first_gradient_dispatch_seconds"] is None:
-                    profile["first_gradient_dispatch_seconds"] = call_elapsed
-                profile["gradient_dispatch_seconds"] += call_elapsed
-                profile["gradient_calls"] += 1
-                loss_parts.append(loss)
-                n = stop - cursor
-                label_counts[1] += int(y[cursor:stop].sum())
-                label_counts[0] += int(n - y[cursor:stop].sum())
-                accumulation_started = time.perf_counter()
-                for i, grad in enumerate(grads):
-                    if grad is None:
-                        continue
-                    if isinstance(grad, tf.IndexedSlices):
-                        if accum[i] is None:
-                            accum[i] = [grad]
-                        elif isinstance(accum[i], list):
-                            accum[i].append(grad)
-                        else:
-                            raise TypeError("gradient type changed during accumulation")
-                    else:
-                        if accum[i] is None:
-                            accum[i] = grad
-                        elif isinstance(accum[i], list):
-                            raise TypeError("gradient type changed during accumulation")
-                        else:
-                            accum[i] = accum[i] + grad
-                profile["gradient_accumulation_dispatch_seconds"] += time.perf_counter() - accumulation_started
-                pending += n
-                accumulated_count += n
-                examples += n
-                last_candidate_key = _candidate_cursor_key(metadata[stop - 1])
-                cursor = stop
-                if pending == effective_batch:
-                    apply_accumulated()
-                    if ((max_updates is not None and update >= max_updates) or
-                            (stop_after_updates_this_run is not None and updates_this_run >= stop_after_updates_this_run)):
-                        stop_training = True
-                        break
-            if stop_training:
+        for features, labels, metadata in iter_train_batches(
+                store, partition, seed, max_impressions=max_impressions):
+            if replay:
+                skipped = min(replay, len(metadata))
+                replay_key = _candidate_cursor_key(metadata[skipped - 1])
+                replay -= skipped
+                if replay == 0 and replay_key != saved_last_candidate_key:
+                    raise ValueError("cannot resume: deterministic replay candidate key differs")
+                if skipped == len(metadata):
+                    continue
+                features = {k: v[skipped:] for k, v in features.items()}
+                labels = {k: v[skipped:] for k, v in labels.items()}
+                metadata = metadata[skipped:]
+            if update < total_updates:
+                yield features, labels, metadata
+            elif not replay:
                 break
-        if stop_training:
-            break
-    if replay_remaining:
-        raise ValueError("cannot resume: selected candidate stream ended before the saved cursor")
-    if resume and sampling_cursor > 0 and replay_last_candidate_key != saved_last_candidate_key:
-        raise ValueError("cannot resume: saved candidate key was not verified during deterministic replay")
-    apply_accumulated()
+        if replay:
+            raise ValueError("cannot resume: iterator ended before saved sampling cursor")
+
+    # SQLite's legacy reader is thread-affine. The production compact reader
+    # uses read-only memmaps and can run on the prefetch producer thread.
+    active_prefetch = prefetch if hasattr(store, "compact") else 0
+    batches = prefetch_batches(effective_batches(remaining_groups(), effective_batch), active_prefetch)
+    start_time = time.time()
+    print(json.dumps({"training_layout": layout, "precision": precision,
+                      "train_step_xla": bool(train_step_xla), "prefetch_batches": active_prefetch,
+                      "checkpoint_every_updates": checkpoint_every}), flush=True)
+    progress = tqdm(total=total_updates, initial=update, unit="update",
+                    desc="train partition {}".format(partition), dynamic_ncols=True, mininterval=1.0)
+    try:
+        while True:
+            fetch_started = time.perf_counter()
+            try:
+                features, y, metadata = next(batches)
+            except StopIteration:
+                break
+            profile["data_batch_wait_seconds"] += time.perf_counter() - fetch_started
+            if update >= total_updates:
+                break
+            lr = learning_rate_at(update, total_updates,
+                                  peak=TRAINING_CONFIG["learning_rate_peak"],
+                                  minimum=TRAINING_CONFIG["learning_rate_min"],
+                                  warmup_fraction=TRAINING_CONFIG["warmup_fraction"])
+            optimizer.learning_rate.assign(lr)
+            step_started = time.perf_counter()
+            batch_loss_sum = trainer.train_batch(features, y)
+            step_elapsed = time.perf_counter() - step_started
+            profile["train_step_seconds"] += step_elapsed
+            if profile["first_train_step_seconds"] is None:
+                profile["first_train_step_seconds"] = step_elapsed
+            if int(optimizer.iterations.numpy()) != update + 1:
+                raise ValueError("optimizer iteration did not advance exactly once")
+            n = len(y)
+            examples += n
+            label_counts[1] += int(y.sum())
+            label_counts[0] += n - int(y.sum())
+            loss_sum += batch_loss_sum
+            last_effective_loss = batch_loss_sum / n
+            last_candidate_key = _candidate_cursor_key(metadata[-1])
+            update += 1
+            schedule_index = update
+            updates_this_run += 1
+            update_var.assign(update)
+            schedule_var.assign(update)
+            examples_var.assign(examples_at_start + examples)
+            sampling_cursor_var.assign(examples_at_start + examples)
+            last_candidate_key_var.assign(last_candidate_key)
+            if update % checkpoint_every == 0:
+                save_started = time.perf_counter()
+                manager.save(checkpoint_number=update)
+                profile["checkpoint_save_seconds"] += time.perf_counter() - save_started
+            if updates_this_run > profile["benchmark_warmup_updates"]:
+                profile["steady_state_updates"] += 1
+                profile["steady_state_candidates"] += n
+                profile["steady_state_seconds"] += time.perf_counter() - fetch_started
+            progress.update(1)
+            progress.set_postfix(loss="{:.5f}".format(last_effective_loss),
+                                 lr="{:.3g}".format(lr), examples=examples_at_start + examples,
+                                 ex_s="{:.1f}".format(examples / max(time.time() - start_time, 1e-9)),
+                                 ckpt=Path(manager.latest_checkpoint).name if manager.latest_checkpoint else "-",
+                                 refresh=False)
+            if (update >= total_updates or (stop_after_updates_this_run is not None
+                    and updates_this_run >= stop_after_updates_this_run)):
+                break
+    finally:
+        batches.close()
+        progress.close()
+    profile["overflow_retries"] = trainer.overflow_retries
+    profile["loss_scale"] = float(trainer.loss_scale.scale.numpy())
+    profile["steady_state_candidates_per_second"] = (
+        profile["steady_state_candidates"] / profile["steady_state_seconds"]
+        if profile["steady_state_seconds"] else None)
     if max_updates is None and max_impressions is None and stop_after_updates_this_run is None:
         if int(sampling_cursor_var.numpy()) != int(count["selected_candidates"]):
             raise ValueError("full partition iterator ended at a different sampling cursor than its exact count")
@@ -964,11 +894,6 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
         save_started = time.perf_counter()
         manager.save(checkpoint_number=update)
         profile["checkpoint_save_seconds"] += time.perf_counter() - save_started
-    progress.set_postfix(
-        loss="{:.5f}".format(last_effective_loss) if last_effective_loss is not None else "n/a",
-        examples=int(examples_at_start + examples),
-        ckpt=Path(manager.latest_checkpoint).name if manager.latest_checkpoint else "-")
-    progress.close()
     elapsed = time.time() - start_time
     full_epoch = max_updates is None and max_impressions is None and stop_after_updates_this_run is None
     report = {"status": "EPOCH_ITERATOR_EXHAUSTED" if full_epoch else "PARTIAL_COMPUTE",
@@ -984,17 +909,22 @@ def run_train(partition=TRAINING_CONFIG["default_partition"], max_impressions=No
               "optimizer_iterations": int(optimizer.iterations.numpy()),
               "schedule_index_next_update": int(schedule_var.numpy()),
               "effective_batch_size": effective_batch, "microbatch_size": microbatch,
+              "training_layout": layout, "precision": precision, "train_step_xla": bool(train_step_xla),
               "loss_mean": loss_sum / max(1, examples), "elapsed_seconds": elapsed,
               "examples_per_second": examples / max(elapsed, 1e-9),
               "latest_checkpoint": manager.latest_checkpoint,
               "database_location": database_location,
               "checkpoint_bytes": sum(p.stat().st_size for p in (out_dir / "checkpoints").glob("*")),
               "performance": profile,
-              "resume_command": ("PYTHONPATH=. /tmp/mind-train-tf215/bin/python -m mind_news_metadata.full_pipeline train "
-                                 "--partition {} --seed {} --effective-batch {} --microbatch {}{}{} --resume --output-dir {}".format(
-                                     partition, seed, effective_batch, microbatch,
+              "resume_command": ("python -m mind_news_metadata.full_pipeline train "
+                                 "--partition {} --seed {} --effective-batch {} --batch-size {} "
+                                 "--replicas {} --precision {} --prefetch-batches {} --checkpoint-every {}"
+                                 "{}{}{} --resume --output-dir {} --db {}".format(
+                                     partition, seed, effective_batch, microbatch, replicas, precision,
+                                     prefetch, checkpoint_every, " --train-step-xla" if train_step_xla else "",
                                      " --max-impressions {}".format(max_impressions) if max_impressions is not None else "",
-                                     " --max-updates {}".format(max_updates) if max_updates is not None else "", out_dir)),
+                                     " --max-updates {}".format(max_updates) if max_updates is not None else "",
+                                     out_dir, db_path)),
               "config_sha256": config_hash}
     (out_dir / "training_progress.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
@@ -1054,7 +984,15 @@ def main():
     tr = sub.add_parser("train")
     tr.add_argument("--db", default=str(DEFAULT_DB)); tr.add_argument("--partition", type=int, default=TRAINING_CONFIG["default_partition"])
     tr.add_argument("--seed", type=int, default=TRAINING_CONFIG["partition_base_seed"]); tr.add_argument("--effective-batch", type=int, default=TRAINING_CONFIG["effective_batch_size"])
-    tr.add_argument("--microbatch", type=int, default=TRAINING_CONFIG["microbatch_size"]); tr.add_argument("--max-impressions", type=int)
+    tr.add_argument("--batch-size", "--microbatch", dest="microbatch", type=int,
+                    default=TRAINING_CONFIG["microbatch_size"], help="candidates per GPU per microstep")
+    tr.add_argument("--replicas", type=int, default=TRAINING_CONFIG["replicas"])
+    tr.add_argument("--precision", choices=("float32", "mixed_float16"), default=TRAINING_CONFIG["precision"])
+    tr.add_argument("--prefetch-batches", type=int, default=EXECUTION_CONFIG.prefetch_batches)
+    tr.add_argument("--checkpoint-every", type=int, default=EXECUTION_CONFIG.checkpoint_every_updates)
+    tr.add_argument("--train-step-xla", action=argparse.BooleanOptionalAction, default=TRAINING_CONFIG["train_step_xla"])
+    tr.add_argument("--allow-cpu", action="store_true")
+    tr.add_argument("--max-impressions", type=int)
     tr.add_argument("--max-updates", type=int); tr.add_argument("--resume", action="store_true")
     tr.add_argument("--stop-after-updates-this-run", type=int)
     tr.add_argument("--output-dir")
@@ -1084,7 +1022,10 @@ def main():
     if a.command == "train":
         print(json.dumps(run_train(a.partition, a.max_impressions, a.effective_batch,
                                    a.microbatch, a.max_updates, a.seed, a.resume,
-                                   a.output_dir, a.db, a.stop_after_updates_this_run), indent=2))
+                                   a.output_dir, a.db, a.stop_after_updates_this_run,
+                                   replicas=a.replicas, precision=a.precision,
+                                   prefetch=a.prefetch_batches, checkpoint_every=a.checkpoint_every,
+                                   train_step_xla=a.train_step_xla, allow_cpu=a.allow_cpu), indent=2))
     elif a.command == "build-membership":
         from .build_train_did_membership import build
         print(json.dumps(build(a.db, a.train_behaviors, a.output), indent=2))

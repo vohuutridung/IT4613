@@ -63,6 +63,10 @@ bash deployment/kaggle/run.sh \
   --mode single \
   --prepared-root /kaggle/input/CHANGE_ME_PREPARED/prepared \
   --partition 0 \
+  --effective-batch 1024 \
+  --batch-size 64 \
+  --replicas 2 \
+  --precision mixed_float16 \
   --work-root /kaggle/working/mind15
 ```
 
@@ -158,6 +162,7 @@ Các mode:
 
 - `prepare`: preprocess raw MIND.
 - `train`: train một partition.
+- `benchmark`: so sánh FP32, FP16 và FP16 + XLA trên các run độc lập.
 - `single`: train một partition rồi tạo submission.
 - `train-ensemble`: train partitions 0 đến 4.
 - `submit`: tạo submission từ một model.
@@ -171,9 +176,16 @@ Tham số chính:
 - `--work-root`: output root, mặc định `/kaggle/working/mind15`.
 - `--partition`: partition `0..4`.
 - `--effective-batch`: effective batch size.
-- `--microbatch`: microbatch size.
+- `--batch-size` (alias `--microbatch`): microbatch **trên mỗi GPU**, mặc định `64`.
+- `--replicas`: số GPU cùng train một model, mặc định `2`; thiếu GPU sẽ báo lỗi.
+- `--precision`: `mixed_float16` (mặc định) hoặc `float32`.
+- `--prefetch-batches`: số batch CPU chuẩn bị trước, mặc định `2`; `0` để tắt.
+- `--checkpoint-every`: lưu checkpoint mỗi N optimizer updates, mặc định `250`.
+- `--train-step-xla` / `--no-train-step-xla`: thử XLA cho forward/backward và accumulation; mặc định tắt.
 - `--seed`: random seed.
-- `--max-updates`: giới hạn update để chạy thử.
+- `--max-updates`: giới hạn update **và thay đổi LR horizon** để chạy thử.
+- `--stop-after-updates-this-run`: dừng sau N updates trong phiên, giữ nguyên LR horizon của cả epoch.
+- `--benchmark-updates`: số updates mỗi cấu hình khi `--mode benchmark`, mặc định `30`.
 - `--resume-run`: checkpoint run cần resume.
 - `--run-dir`: model run dùng để submit/upload.
 - `--output`: đường dẫn submission ZIP.
@@ -198,11 +210,51 @@ Training:
 - Optimizer: Adam.
 - Peak/min learning rate: `1e-3` / `1e-6`.
 - Warmup: `10%`.
-- Effective batch / microbatch: `1024` / `16`.
+- Effective batch: `1024`; per-GPU microbatch: `64`; GPU replicas: `2`.
+- Accumulation tự suy ra: `1024 / (64 × 2) = 8`; không có flag grad accumulation.
+- Effective batch phải chia hết cho `batch-size × replicas`.
+- Mixed precision FP16, FP32 loss/attention normalization/gradient accumulation và dynamic loss scaling.
+- Ordered CPU prefetch `2` batches; vectorized memmap feature/history gathering.
+- Graph loop tích lũy gradient trên từng GPU; sparse embedding gradients được gộp theo index trước khi đồng bộ ở optimizer update.
+- Batch cuối được padding với trọng số loss bằng 0 và chuẩn hóa theo số candidates thực tế.
 - Negative partitions: `5`.
 - Default partition: `0`.
 - Seed: `20261110`.
-- Checkpoint mỗi `25` updates, giữ `2` checkpoint gần nhất.
+- Checkpoint mỗi `250` updates, giữ `2` checkpoint gần nhất; luôn lưu khi kết thúc phiên.
+- Loss scale và bộ đếm scale được lưu cùng model/Adam/candidate cursor. Overflow FP16 sẽ tính lại cùng batch với scale thấp hơn, không tăng Adam/cursor/LR step.
+
+Các flags hiệu năng và source fingerprint được khóa trong `run_config.json`.
+Khi chuyển từ implementation cũ hoặc đổi batch/replicas/precision, dùng work-root mới;
+checkpoint cũ không được resume trực tiếp. Prepared bundle hiện tại vẫn dùng lại được.
+
+### Benchmark FP32 / FP16 / XLA trên cùng hai GPU
+
+```bash
+bash deployment/kaggle/run.sh \
+  --mode benchmark \
+  --prepared-root /kaggle/input/CHANGE_ME_PREPARED/prepared \
+  --effective-batch 1024 --batch-size 64 --replicas 2 \
+  --benchmark-updates 30 \
+  --work-root /kaggle/working/mind15-benchmark
+```
+
+Mỗi case dùng một run mới, cùng seed/partition và LR horizon của cả epoch.
+Kết quả nằm trong `benchmarks/benchmark_summary.json`; trường
+`steady_state_candidates_per_second` bỏ qua 5 updates đầu để loại thời gian trace/compile.
+Số đo này gồm chờ batch, train step và checkpoint định kỳ, không gồm khởi tạo/đếm
+partition hoặc checkpoint cuối phiên. Adam JIT mặc định tắt; flag XLA chỉ compile graph tính và tích lũy gradient.
+Lỗi XLA được ghi rõ; không tự bật XLA cho train chính. Không có submission từ benchmark. Dùng work-root mới khi benchmark lại.
+
+CPU smoke test: thêm `--replicas 1 --precision float32 --allow-cpu`.
+Multi-GPU runtime checks (trong môi trường TF 2.15.1 của Kaggle):
+
+```bash
+MIND_TEST_GPUS=1 /kaggle/working/mind15/python311-tf215/bin/python \
+  -m unittest discover -s tests -p test_distributed_training.py
+```
+
+Nếu không đặt `MIND_TEST_GPUS`, test dùng hai logical CPU. Đặt thêm
+`MIND_TEST_XLA=1` để kiểm tra khả năng compile sparse train step.
 
 Input limits:
 

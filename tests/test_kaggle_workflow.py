@@ -57,6 +57,27 @@ class SubmissionFormatTest(unittest.TestCase):
 
 
 class RunnerCliTest(unittest.TestCase):
+    def test_training_defaults_and_overrides_reach_worker(self):
+        command = [sys.executable, str(ROOT / "deployment/kaggle/runner.py"),
+                   "--mode", "train", "--prepared-root", "/not-mounted/prepared",
+                   "--work-root", "/tmp/mind15-dry-train", "--dry-run"]
+        default = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(default.returncode, 0, default.stderr)
+        self.assertIn('"--batch-size", "64"', default.stdout)
+        self.assertIn('"--replicas", "2"', default.stdout)
+        self.assertIn('"--checkpoint-every", "250"', default.stdout)
+        override = subprocess.run(command + ["--effective-batch", "2048", "--batch-size", "128",
+            "--precision", "float32", "--prefetch-batches", "0", "--train-step-xla"],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(override.returncode, 0, override.stderr)
+        self.assertIn('"--effective-batch", "2048"', override.stdout)
+        self.assertIn('"--batch-size", "128"', override.stdout)
+        self.assertIn('"--train-step-xla"', override.stdout)
+        invalid = subprocess.run(command + ["--effective-batch", "1000"],
+                                 cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("divisible", invalid.stderr)
+
     def test_prepare_dry_run_needs_no_dataset(self):
         command = [
             sys.executable,
@@ -207,6 +228,27 @@ class CompactStoreTest(unittest.TestCase):
                 [(1, 1), (2, 0)])
             _, _, shuffled = store.batch("train", impression_ids=[2, 1])
             self.assertEqual([row["impression_id"] for row in shuffled], ["11", "10", "10"])
+
+    def test_vectorized_loader_handles_missing_news_and_empty_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._fixture(Path(temporary))
+            behavior = prepared / "compact/behaviors/train"
+            np.save(behavior / "history_offsets.npy", np.asarray([0, 0, 3], np.int64))
+            np.asarray([1, 99, 2], dtype="<i4").tofile(behavior / "history_did.i32")
+            np.asarray([99, 1, 2], dtype="<i4").tofile(behavior / "candidate_did.i32")
+            np.save(behavior / "uid.npy", np.asarray([99, 3], np.int32))
+            store = CompactNewsBatchStore(prepared)
+            features, labels, metadata = store.batch("train", impression_ids=[2, 1])
+            np.testing.assert_array_equal(features["uid"], [3, 1, 1])
+            np.testing.assert_array_equal(features["his_id"][0, :3], [1, 99, 2])
+            np.testing.assert_array_equal(features["his_title_tokens"][0, :3, 0], [0, 0, 12])
+            np.testing.assert_array_equal(features["his_title_tokens"][1:], 0)
+            np.testing.assert_array_equal(features["cur_title_tokens"][:, 0], [12, 0, 0])
+            self.assertEqual([m["news_id"] for m in metadata], ["N1", None, None])
+            features2, labels2, metadata2 = store.batch("train", impression_ids=[2, 1], include_metadata=False)
+            self.assertIsNone(metadata2)
+            for key in features:
+                np.testing.assert_array_equal(features[key], features2[key])
 
     def test_compact_batch_matches_sqlite_batch(self):
         with tempfile.TemporaryDirectory() as temporary:

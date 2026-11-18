@@ -376,25 +376,22 @@ class Runner:
             raise FileExistsError("resume output already exists: {}".format(output))
         shutil.copytree(resume_source, output)
 
-    def _gpu_preflight(self):
+    def _gpu_preflight(self, required=1):
         if self.args.allow_cpu:
             self.log.emit("SKIP", stage="gpu-preflight", reason="--allow-cpu")
             return
         probe = (
-            "import json,tensorflow as tf;"
-            "g=tf.config.list_physical_devices('GPU');"
-            "assert g,'TensorFlow does not see a GPU';"
-            "tf.config.experimental.set_memory_growth(g[0],True);"
-            "\nwith tf.device('/GPU:0'):\n"
-            " a=tf.random.uniform([512,512]);b=tf.random.uniform([512,512]);c=tf.matmul(a,b)\n"
-            "assert 'GPU:0' in c.device.upper(),c.device;"
-            "print(json.dumps({'tensorflow':tf.__version__,'gpu':g[0].name,'device':c.device}))"
+            "import json,tensorflow as tf; "
+            "g=tf.config.list_physical_devices('GPU'); "
+            "assert len(g)>=" + str(required) + ", 'Not enough visible GPUs: '+str(g); "
+            "[tf.config.experimental.set_memory_growth(x,True) for x in g]; "
+            "print(json.dumps({'tensorflow':tf.__version__,'gpus':[x.name for x in g]}))"
         )
         self.command([self.python, "-c", probe], stage="gpu-preflight")
 
     def train(self, partition: int):
         self.use_prepared()
-        self._gpu_preflight()
+        self._gpu_preflight(required=self.args.replicas)
         run_dir = self.work_root / "recommendation_runs" / ("partition-{}".format(partition))
         progress_path = run_dir / "training_progress.json"
         if progress_path.is_file():
@@ -437,13 +434,22 @@ class Runner:
             "--partition", partition,
             "--seed", self.args.seed,
             "--effective-batch", self.args.effective_batch,
-            "--microbatch", self.args.microbatch,
+            "--batch-size", self.args.microbatch,
+            "--replicas", self.args.replicas,
+            "--precision", self.args.precision,
+            "--prefetch-batches", self.args.prefetch_batches,
+            "--checkpoint-every", self.args.checkpoint_every,
+            "--train-step-xla" if self.args.train_step_xla else "--no-train-step-xla",
             "--output-dir", run_dir,
         ]
+        if self.args.allow_cpu:
+            command.append("--allow-cpu")
         if resume:
             command.append("--resume")
         if self.args.max_updates is not None:
             command.extend(["--max-updates", self.args.max_updates])
+        if self.args.stop_after_updates_this_run is not None:
+            command.extend(["--stop-after-updates-this-run", self.args.stop_after_updates_this_run])
         self.command(command, stage="train-partition-{}".format(partition))
         return run_dir
 
@@ -554,6 +560,17 @@ class Runner:
             self.prepare()
         elif mode == "train":
             self.train(self.args.partition)
+        elif mode == "benchmark":
+            self.use_prepared()
+            self.command([
+                self.python, ROOT / "scripts/benchmark_training.py",
+                "--prepared-root", CANONICAL_PREPARED,
+                "--work-root", self.work_root / "benchmarks",
+                "--effective-batch", self.args.effective_batch,
+                "--batch-size", self.args.microbatch, "--replicas", self.args.replicas,
+                "--updates", self.args.benchmark_updates, "--partition", self.args.partition,
+                "--seed", self.args.seed, "--prefetch-batches", self.args.prefetch_batches,
+                "--checkpoint-every", self.args.checkpoint_every], stage="benchmark-training")
         elif mode == "train-ensemble":
             for partition in range(5):
                 self.train(partition)
@@ -580,15 +597,25 @@ def parser():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mode", required=True, choices=(
         "prepare", "train", "train-ensemble", "submit",
-        "ensemble-submit", "single", "push-model"))
+        "ensemble-submit", "single", "push-model", "benchmark"))
     ap.add_argument("--data-root")
     ap.add_argument("--prepared-root")
     ap.add_argument("--work-root", default=str(default_work))
     ap.add_argument("--partition", type=int, default=0, choices=range(5))
-    ap.add_argument("--effective-batch", type=int, default=1024)
-    ap.add_argument("--microbatch", type=int, default=16)
+    from mind_config import EXECUTION_CONFIG, TRAINING_CONFIG
+    ap.add_argument("--effective-batch", type=int, default=TRAINING_CONFIG["effective_batch_size"])
+    ap.add_argument("--batch-size", "--microbatch", dest="microbatch", type=int,
+                    default=TRAINING_CONFIG["microbatch_size"], help="microbatch size per GPU")
+    ap.add_argument("--replicas", type=int, default=TRAINING_CONFIG["replicas"])
+    ap.add_argument("--precision", choices=("float32", "mixed_float16"), default=TRAINING_CONFIG["precision"])
+    ap.add_argument("--prefetch-batches", type=int, default=EXECUTION_CONFIG.prefetch_batches)
+    ap.add_argument("--checkpoint-every", type=int, default=EXECUTION_CONFIG.checkpoint_every_updates)
+    ap.add_argument("--train-step-xla", action=argparse.BooleanOptionalAction,
+                    default=TRAINING_CONFIG["train_step_xla"])
     ap.add_argument("--seed", type=int, default=20261110)
     ap.add_argument("--max-updates", type=int)
+    ap.add_argument("--stop-after-updates-this-run", type=int)
+    ap.add_argument("--benchmark-updates", type=int, default=30)
     ap.add_argument("--resume-run")
     ap.add_argument("--run-dir", action="append", default=[])
     ap.add_argument("--output")
@@ -602,6 +629,11 @@ def parser():
 
 def main():
     args = parser().parse_args()
+    if args.mode in ("train", "train-ensemble", "single", "benchmark"):
+        from mind_news_metadata.training_runtime import batch_layout
+        batch_layout(args.effective_batch, args.microbatch, args.replicas)
+        if args.prefetch_batches < 0 or args.checkpoint_every < 1:
+            raise ValueError("invalid prefetch depth or checkpoint interval")
     Runner(args).execute()
 
 

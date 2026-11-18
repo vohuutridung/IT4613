@@ -77,12 +77,15 @@
     "clipvalue": null,
     "global_clipnorm": null,
     "use_ema": false,
-    "jit_compile": true,
+    "jit_compile": false,
     "schedule": "ceil(0.1*updates) linear warmup then linear decay to min over one epoch",
     "schedule_step_convention": "zero-based update counter; assign learning_rate_at(update) before apply_gradients, increment update after the optimizer step",
-    "ranking_metrics_k": [5, 10],
+    "ranking_metrics_k": [
+      5,
+      10
+    ],
     "effective_batch_size": 1024,
-    "microbatch_size": 16,
+    "microbatch_size": 64,
     "partition_count": 5,
     "partition_base_seed": 20261110,
     "default_partition": 0,
@@ -111,16 +114,20 @@
     "initializer": "existing encoder initializers and Keras Dense GlorotUniform/zero bias defaults; nonhistorical numerical equivalence not claimed",
     "tie_break": "candidate_position ascending",
     "resume": "strict TensorFlow restore includes model, Adam slots, optimizer iterations, update counter, examples_seen cursor, and schedule index; counters must align; saved optimizer LR must match the prior schedule step within rtol=1e-6/atol=1e-12; cursor must equal min(update*effective_batch_size, selected_candidates); deterministic sampler is replayed from its locked seed; run config and actual database content fingerprint must match",
-    "split_policy": "train-only partition training; dev full unsampled; test labels prohibited"
+    "split_policy": "train-only partition training; dev full unsampled; test labels prohibited",
+    "replicas": 2,
+    "precision": "mixed_float16",
+    "train_step_xla": false
   },
   "execution": {
     "default_candidate_batch_size": 32,
     "training_impression_group_size": 128,
     "partition_count_group_size": 512,
     "evaluation_batch_size": 512,
-    "checkpoint_every_updates": 25,
+    "checkpoint_every_updates": 250,
     "news_cache_max_bytes": 67108864,
-    "news_cache_max_items": 8192
+    "news_cache_max_items": 8192,
+    "prefetch_batches": 2
   },
   "reimplementation_decisions": [
     "The active architecture intentionally omits source cur_body and his_body fields; it is not the source 17-field body model.",
@@ -129,7 +136,7 @@
     "Query-free masked attention for his_id is a disclosed choice; the exact private PoolingWrapper('att') query use remains unverified.",
     "Private gezi/melt/husky components are not replaced by similarly named packages. Attention/DIN/pooling implementations are independent reimplementations.",
     "Keras Adam remains the active optimizer implementation. The source shell names bert-adam, but the exact runtime dispatch/dependency binding is not proven; no equivalence claim is made.",
-    "The source shell contains batch-size flags 4096 in common.sh and 1024 appended by base.sh; the technical report states batch_size=1024. This local contract uses effective batch 1024 and microbatch 16 with accumulation."
+    "Effective batch defaults to 1024, with per-GPU microbatch 64 and two replicas; accumulation is derived as effective_batch/(microbatch*replicas). Execution flags are configurable."
   ],
   "shared_architecture": {
     "embedding_dim": 100,

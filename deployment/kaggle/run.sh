@@ -32,7 +32,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 mkdir -p "$WORK_ROOT"
-if [[ "$ALLOW_CPU" != "1" && "$MODE" =~ ^(train|train-ensemble|single|submit|ensemble-submit)$ ]]; then
+if [[ "$ALLOW_CPU" != "1" && "$MODE" =~ ^(train|train-ensemble|single|submit|ensemble-submit|benchmark)$ ]]; then
   if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi -L; then
     echo "No NVIDIA GPU is visible. Select a Kaggle GPU accelerator or pass --allow-cpu." >&2
     exit 1
@@ -74,7 +74,8 @@ fi
 
 export PYTHONPATH="$ROOT"
 export PYTHONUNBUFFERED=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Respect an explicit device restriction; otherwise expose both Kaggle T4s.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export TF_FORCE_GPU_ALLOW_GROWTH="${TF_FORCE_GPU_ALLOW_GROWTH:-true}"
 

@@ -12,9 +12,9 @@
   ],
   "files": [
     {
-      "bytes": 8208,
+      "bytes": 8297,
       "path": "configs/mind_no_body_15field.json",
-      "sha256": "0f0dca3b8447ae9b7a34bfd80f92ab823d96f2912b7aa0478caf4829db99b039"
+      "sha256": "da20b4180b22f4bea083969c8805e2fabe4facda4be3f59a6c0e8e0855455004"
     },
     {
       "bytes": 2011,
@@ -67,14 +67,19 @@
       "sha256": "0b8d9f3f2aba2a7e972ac5cb227afd8b4ac8aac746e2d2a17feb9c6e86eaf59c"
     },
     {
-      "bytes": 16749,
+      "bytes": 14609,
       "path": "mind_news_metadata/compact_data.py",
-      "sha256": "eef486937c534d0fa2849b2c5e51985d0be26546794ecae00765d9101995abe1"
+      "sha256": "c2217e8ea4e903c7fcdcbe1fbcdfc93b16a558076cb95f58a8e5845e4f7722bd"
     },
     {
       "bytes": 5775,
       "path": "mind_news_metadata/data_validation.py",
       "sha256": "abe238c90e5ec6e9e45c62dafc750860bac6d398e3691b3eff3c3bad8e30dfa0"
+    },
+    {
+      "bytes": 8586,
+      "path": "mind_news_metadata/distributed_training.py",
+      "sha256": "64c7d5b3c74d89787283b2684648c80e81dc9c6487f3b41f37b88ada16fe8d08"
     },
     {
       "bytes": 116,
@@ -87,14 +92,14 @@
       "sha256": "5d99896469a6c629ec58ee90e0747004577a26dc4d0f3bbbc8f37a2bd0882741"
     },
     {
-      "bytes": 18148,
+      "bytes": 18352,
       "path": "mind_news_metadata/field_encoder.py",
-      "sha256": "79c3a5cf835a9d81e6386ae375240a48b8054f0a0d268e45bd26f1410f4d6d93"
+      "sha256": "38564e207fcde301a18978b894afd057e83ed7e04767b33ad07030d9a9b7dd15"
     },
     {
-      "bytes": 60926,
+      "bytes": 59977,
       "path": "mind_news_metadata/full_pipeline.py",
-      "sha256": "960eb65889574a1e4cdc2eb534bb8892b67a174563e39a07177afb218d9ae522"
+      "sha256": "ea9f2d613dee0975e0fcb21a7760c94a985457fcc2cedb3231eeedb1f6e12172"
     },
     {
       "bytes": 6871,
@@ -102,9 +107,9 @@
       "sha256": "296c579dce48f011265b99e9d681f71a2d3ed03aabb02580907d17d7d47180b4"
     },
     {
-      "bytes": 19902,
+      "bytes": 20038,
       "path": "mind_news_metadata/prediction.py",
-      "sha256": "94c0ed02d21906a1a8f3f3e941a23d163288f246cfec5ee482a025db1a470c73"
+      "sha256": "b6c74236027f9afdec8675926a22035cc589400b88cc6d885669d7fe6a5b836e"
     },
     {
       "bytes": 7773,
@@ -112,19 +117,24 @@
       "sha256": "be170d3034012ee8c85826fc86432c97e581e72013b13eaed76d9e7132ece91e"
     },
     {
-      "bytes": 4085,
+      "bytes": 4088,
       "path": "mind_news_metadata/recommendation_model.py",
-      "sha256": "86821ef94ecc4e8e8a0681dc7c5560b15a71a9fa46636e7c33b6cedf29aec919"
+      "sha256": "22219a5f831ec2631009349fa4061bc41fbd577c6adfc14c2efccdbf3985544b"
     },
     {
-      "bytes": 7185,
+      "bytes": 10760,
       "path": "mind_news_metadata/recommendation_protocol.py",
-      "sha256": "ef43126d40f9676ce82de695d952a52ae086bba7937f59049199f06bd790a2cd"
+      "sha256": "56266098031fc66a0bf0378a8d9baf1851e51afeb4ed26dda5e5cd1df1b9d198"
     },
     {
       "bytes": 1926,
       "path": "mind_news_metadata/submission_format.py",
       "sha256": "be7f8c7a75c2e1d9e3a0a0bede11ba597bfe1f954e3f2b865bcf8a38fb8910bb"
+    },
+    {
+      "bytes": 3088,
+      "path": "mind_news_metadata/training_runtime.py",
+      "sha256": "e274f40d485235cd59583fa874a3c733e2bce382fb1b4fc8efd971910dcf5d1c"
     },
     {
       "bytes": 20703,
@@ -147,7 +157,7 @@
       "sha256": "cbdede30eae961029972d42f37cf49fb8872981c725034cbf29bb1626baa4895"
     }
   ],
-  "payload_sha256": "749656bf6747769541a1ad48828d5f9c4d12a6d2a800bc4dc0b1e694a205b73a",
+  "payload_sha256": "ee6c10666c683a2df918850c6810e3c1be72e3990e6ecab6c120a6582604c5b8",
   "schema_version": 1,
   "upstream_commit": "f632bdf7b1136dff142835f9fe69c8ce5f8c166d",
   "variant": "mind_no_body_15field"

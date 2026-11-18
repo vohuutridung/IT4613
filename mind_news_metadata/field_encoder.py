@@ -21,7 +21,7 @@ class MaskedAttention(tf.keras.layers.Layer):
             kernel_initializer=TRAINING_CONFIG["dense_kernel_initializer"])
 
     def call(self, values, mask):
-        scores = tf.squeeze(self.score(self.proj(values)), axis=-1)
+        scores = tf.cast(tf.squeeze(self.score(self.proj(values)), axis=-1), tf.float32)
         mask = tf.cast(mask, tf.bool)
         floor = tf.ones_like(scores) * tf.cast(ENCODER_CONFIG.masked_score_floor, scores.dtype)
         scores = tf.where(mask, scores, floor)
@@ -29,7 +29,8 @@ class MaskedAttention(tf.keras.layers.Layer):
         weights = weights * tf.cast(mask, weights.dtype)
         denom = tf.reduce_sum(weights, axis=-1, keepdims=True)
         weights = tf.math.divide_no_nan(weights, denom)
-        pooled = tf.reduce_sum(values * tf.expand_dims(weights, -1), axis=-2)
+        pooled = tf.cast(tf.reduce_sum(tf.cast(values, tf.float32)
+                                      * tf.expand_dims(weights, -1), axis=-2), values.dtype)
         return pooled, weights
 
 
@@ -55,7 +56,7 @@ class DinAttention(tf.keras.layers.Layer):
         q = tf.expand_dims(query, axis=1)
         q = tf.ones_like(keys) * q
         interaction = tf.concat([q, keys, q - keys, q * keys], axis=-1)
-        scores = tf.squeeze(self.score(self.hidden(interaction)), axis=-1)
+        scores = tf.cast(tf.squeeze(self.score(self.hidden(interaction)), axis=-1), tf.float32)
         mask = tf.cast(mask, tf.bool)
         scores = tf.where(
             mask, scores,
@@ -63,7 +64,8 @@ class DinAttention(tf.keras.layers.Layer):
         weights = tf.nn.softmax(scores, axis=-1)
         weights = weights * tf.cast(mask, weights.dtype)
         weights = tf.math.divide_no_nan(weights, tf.reduce_sum(weights, axis=-1, keepdims=True))
-        result = tf.reduce_sum(keys * tf.expand_dims(weights, -1), axis=1)
+        result = tf.cast(tf.reduce_sum(tf.cast(keys, tf.float32)
+                                      * tf.expand_dims(weights, -1), axis=1), keys.dtype)
         self.last_query, self.last_weights = query, weights
         return result
 

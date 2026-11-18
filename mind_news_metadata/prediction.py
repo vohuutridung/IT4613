@@ -52,12 +52,13 @@ def load_run(run_dir, db_path=DEFAULT_DB):
         raise ValueError("checkpoint input DB/mapping/artifact fingerprint differs from current files")
     if config.get("config", {}).get("implementation_fingerprint") != implementation_fingerprint():
         raise ValueError("checkpoint source code fingerprint differs from current implementation")
-    dynamic = {"effective_batch_size", "microbatch_size"}
+    dynamic = {"effective_batch_size", "microbatch_size", "replicas", "precision", "train_step_xla"}
     for key, value in TRAINING_CONFIG.items():
         if key in dynamic:
             continue
         if config.get("config", {}).get(key) != value:
             raise ValueError("checkpoint model/protocol contract differs at {}".format(key))
+    tf.keras.mixed_precision.set_global_policy(config["config"].get("precision", "float32"))
     db_path = requested_db_path.resolve(strict=True)
     model, store, word_manifest = make_model(db_path)
     if Path(store.db_path).resolve(strict=True) != db_path:

@@ -12,9 +12,6 @@ from mind_config import EXECUTION_CONFIG, TRAINING_CONFIG
 from .batch_data import (
     PAD_ID,
     UNK_ID,
-    _copy_first_two,
-    _padding_array,
-    uid_embedding_id,
 )
 
 
@@ -221,129 +218,80 @@ class CompactNewsBatchStore:
             return None, None, None
 
         count = len(candidate_indices)
-        f = {
-            "uid": _padding_array((count,)), "did": _padding_array((count,)),
-            "his_id": _padding_array((count, int(CONFIG.max_history))),
-            "cat": _padding_array((count,)), "sub_cat": _padding_array((count,)),
-            "title_entities": _padding_array((count, int(CONFIG.max_title_entities))),
-            "title_entity_types": _padding_array((count, int(CONFIG.max_title_entities))),
-            "abstract_entities": _padding_array((count, int(CONFIG.max_abstract_entities))),
-            "abstract_entity_types": _padding_array((count, int(CONFIG.max_abstract_entities))),
-            "his_title_merge_entities": _padding_array(
-                (count, int(CONFIG.max_history_titles * CONFIG.max_history_title_entities_per_news))),
-            "his_title_merge_entity_types": _padding_array(
-                (count, int(CONFIG.max_history_titles * CONFIG.max_history_title_entities_per_news))),
-            "his_abstract_merge_entities": _padding_array(
-                (count, int(CONFIG.max_history_abstracts * CONFIG.max_history_abstract_entities_per_news))),
-            "his_abstract_merge_entity_types": _padding_array(
-                (count, int(CONFIG.max_history_abstracts * CONFIG.max_history_abstract_entities_per_news))),
-            "his_cats": _padding_array((count, int(CONFIG.max_history))),
-            "his_sub_cats": _padding_array((count, int(CONFIG.max_history))),
-            "cur_title_tokens": _padding_array((count, int(CONFIG.max_title_tokens))),
-            "his_title_tokens": _padding_array(
-                (count, int(CONFIG.max_history_titles), int(CONFIG.max_title_tokens))),
-            "cur_abstract_tokens": _padding_array((count, int(CONFIG.max_abstract_tokens))),
-            "his_abstract_tokens": _padding_array(
-                (count, int(CONFIG.max_history_abstracts), int(CONFIG.max_abstract_tokens))),
-        }
-        labels = np.zeros(count, np.int32)
-        labeled = np.zeros(count, np.bool_)
-        metadata = [] if include_metadata else None
-        history_features = {}
-        for local in dict.fromkeys(map(int, impression_indices)):
-            h_start = int(data["history_offsets"][local])
-            h_stop = int(data["history_offsets"][local + 1])
-            history = np.asarray(
-                data["history_did"][h_start:h_stop], dtype=np.int32)
-            padded = _padding_array((int(CONFIG.max_history),))
-            padded[:len(history)] = history
-            values = {
-                "his_id": padded,
-                "his_cats": _padding_array((int(CONFIG.max_history),)),
-                "his_sub_cats": _padding_array((int(CONFIG.max_history),)),
-                "his_title_tokens": _padding_array(
-                    (int(CONFIG.max_history_titles), int(CONFIG.max_title_tokens))),
-                "his_title_merge_entities": _padding_array(
-                    (int(CONFIG.max_history_titles * CONFIG.max_history_title_entities_per_news),)),
-                "his_title_merge_entity_types": _padding_array(
-                    (int(CONFIG.max_history_titles * CONFIG.max_history_title_entities_per_news),)),
-                "his_abstract_tokens": _padding_array(
-                    (int(CONFIG.max_history_abstracts), int(CONFIG.max_abstract_tokens))),
-                "his_abstract_merge_entities": _padding_array(
-                    (int(CONFIG.max_history_abstracts * CONFIG.max_history_abstract_entities_per_news),)),
-                "his_abstract_merge_entity_types": _padding_array(
-                    (int(CONFIG.max_history_abstracts * CONFIG.max_history_abstract_entities_per_news),)),
-            }
-            for index, did in enumerate(history):
-                did = int(did)
-                if did == PAD_ID or did >= len(self.news["present"]) or not self.news["present"][did]:
-                    continue
-                values["his_cats"][index] = self.news["cat"][did]
-                values["his_sub_cats"][index] = self.news["sub_cat"][did]
-                if index < int(CONFIG.max_history_titles):
-                    values["his_title_tokens"][index] = self.news["title"][did]
-                    pos = index * int(CONFIG.max_history_title_entities_per_news)
-                    _copy_first_two(
-                        values["his_title_merge_entities"][pos:pos + 2],
-                        self.news["title_entities"][did])
-                    _copy_first_two(
-                        values["his_title_merge_entity_types"][pos:pos + 2],
-                        self.news["title_entity_types"][did])
-                if index < int(CONFIG.max_history_abstracts):
-                    values["his_abstract_tokens"][index] = self.news["abstract"][did]
-                    pos = index * int(CONFIG.max_history_abstract_entities_per_news)
-                    _copy_first_two(
-                        values["his_abstract_merge_entities"][pos:pos + 2],
-                        self.news["abstract_entities"][did])
-                    _copy_first_two(
-                        values["his_abstract_merge_entity_types"][pos:pos + 2],
-                        self.news["abstract_entity_types"][did])
-            history_features[local] = values
-
-        impression_base = int(data["meta"]["impression_base"])
-        candidate_base = int(data["meta"]["candidate_base"])
+        dids = np.asarray(data["candidate_did"][candidate_indices], dtype=np.int32)
+        raw_uids = np.asarray(data["uid"][impression_indices], dtype=np.int32)
         uid_rows = self.uid_embedding_rows()
-        for row_index, (candidate_index, local) in enumerate(
-                zip(candidate_indices, impression_indices)):
-            candidate_index, local = int(candidate_index), int(local)
-            did = int(data["candidate_did"][candidate_index])
-            raw_uid = int(data["uid"][local])
-            f["uid"][row_index] = uid_embedding_id(raw_uid, uid_rows, UNK_ID)
-            f["did"][row_index] = did
-            if 0 <= did < len(self.news["present"]) and self.news["present"][did]:
-                f["cat"][row_index] = int(self.news["cat"][did]) or UNK_ID
-                f["sub_cat"][row_index] = int(self.news["sub_cat"][did]) or UNK_ID
-                f["cur_title_tokens"][row_index] = self.news["title"][did]
-                f["cur_abstract_tokens"][row_index] = self.news["abstract"][did]
-                for key in (
-                        "title_entities", "title_entity_types",
-                        "abstract_entities", "abstract_entity_types"):
-                    f[key][row_index] = self.news[key][did]
-                news_id = self.did_tokens[did]
-            else:
-                news_id = None
-            for key, value in history_features[local].items():
-                f[key][row_index] = value
-            raw_click = int(data["click"][candidate_index])
-            labels[row_index] = max(0, raw_click)
-            labeled[row_index] = raw_click >= 0
-            if include_metadata:
-                position = candidate_index - int(data["candidate_offsets"][local])
-                metadata.append({
-                    "candidate_id": candidate_base + candidate_index,
-                    "impression_id": self._decode_impression(data, local),
-                    "position": int(position),
-                    "line_no": local + 1,
-                    "split": split,
-                    "news_id": news_id,
-                    "uid_vocab_id": raw_uid,
-                    "uid_embedding_id": int(f["uid"][row_index]),
-                })
+        f = {"uid": np.where((raw_uids >= 0) & (raw_uids < uid_rows), raw_uids, UNK_ID),
+             "did": dids}
+        n_news = len(self.news["present"])
+        safe = np.clip(dids, 0, n_news - 1)
+        valid = (dids >= 0) & (dids < n_news) & self.news["present"][safe]
+        for target, source in (("cat", "cat"), ("sub_cat", "sub_cat"),
+                               ("cur_title_tokens", "title"), ("cur_abstract_tokens", "abstract"),
+                               ("title_entities", "title_entities"),
+                               ("title_entity_types", "title_entity_types"),
+                               ("abstract_entities", "abstract_entities"),
+                               ("abstract_entity_types", "abstract_entity_types")):
+            values = np.array(self.news[source][safe], dtype=np.int32, copy=True)
+            if target in ("cat", "sub_cat"):
+                values[values == 0] = UNK_ID
+            values[~valid] = PAD_ID
+            f[target] = values
+
+        # Gather each impression's history once, then expand to its candidates.
+        # No Python loop over candidates, history items or feature slots.
+        unique, inverse = np.unique(impression_indices, return_inverse=True)
+        starts = np.asarray(data["history_offsets"][unique])
+        lengths = np.minimum(np.asarray(data["history_offsets"][unique + 1]) - starts,
+                             int(CONFIG.max_history))
+        positions = np.arange(int(CONFIG.max_history))[None, :]
+        history = np.zeros((len(unique), int(CONFIG.max_history)), dtype=np.int32)
+        history_valid = positions < lengths[:, None]
+        indices = starts[:, None] + positions
+        history[history_valid] = data["history_did"][indices[history_valid]]
+        f["his_id"] = history[inverse]
+        safe_history = np.clip(history, 0, n_news - 1)
+        present = ((history != PAD_ID) & (history >= 0) & (history < n_news)
+                   & self.news["present"][safe_history])
+        for target, source in (("his_cats", "cat"), ("his_sub_cats", "sub_cat")):
+            values = np.array(self.news[source][safe_history], dtype=np.int32, copy=True)
+            values[~present] = PAD_ID
+            f[target] = values[inverse]
+        for branch, width in (("title", int(CONFIG.max_history_titles)),
+                              ("abstract", int(CONFIG.max_history_abstracts))):
+            history_ids = safe_history[:, :width]
+            mask = present[:, :width]
+            values = np.array(self.news[branch][history_ids], dtype=np.int32, copy=True)
+            values[~mask] = PAD_ID
+            f["his_" + branch + "_tokens"] = values[inverse]
+            for suffix in ("entities", "entity_types"):
+                values = np.array(self.news[branch + "_" + suffix][history_ids, :2],
+                                  dtype=np.int32, copy=True)
+                values[~mask] = PAD_ID
+                target = "his_" + branch + "_merge_" + suffix
+                f[target] = values.reshape(len(unique), width * 2)[inverse]
+
+        raw_click = np.asarray(data["click"][candidate_indices], dtype=np.int32)
+        labels = np.maximum(raw_click, 0)
+        labeled = raw_click >= 0
+        metadata = None
+        if include_metadata:
+            impression_base = int(data["meta"]["impression_base"])
+            candidate_base = int(data["meta"]["candidate_base"])
+            tokens = {int(local): self._decode_impression(data, int(local)) for local in unique}
+            positions = candidate_indices - data["candidate_offsets"][impression_indices]
+            metadata = [{
+                "candidate_id": candidate_base + int(candidate_indices[i]),
+                "impression_id": tokens[int(impression_indices[i])],
+                "position": int(positions[i]), "line_no": int(impression_indices[i]) + 1,
+                "split": split, "news_id": self.did_tokens[int(dids[i])] if valid[i] else None,
+                "uid_vocab_id": int(raw_uids[i]), "uid_embedding_id": int(f["uid"][i]),
+            } for i in range(count)]
         if profile_timings is not None:
             profile_timings.update({
                 "storage_format": "compact_memmap",
                 "candidate_rows_selected": count,
-                "impressions_selected": len(history_features),
+                "impressions_selected": len(unique),
                 "total_seconds": time.perf_counter() - started,
             })
         return f, {"click": labels, "labeled": labeled}, metadata
