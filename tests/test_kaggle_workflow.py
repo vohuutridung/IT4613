@@ -57,6 +57,26 @@ class SubmissionFormatTest(unittest.TestCase):
 
 
 class RunnerCliTest(unittest.TestCase):
+    def test_submit_uses_inference_batch_and_existing_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary)
+            run_dir = work_root / "recommendation_runs/partition-0"
+            run_dir.mkdir(parents=True)
+            progress = run_dir / "training_progress.json"
+            progress.write_text('{"full_epoch": true}', encoding="utf-8")
+            command = ["bash", str(ROOT / "deployment/kaggle/run.sh"),
+                       "--mode", "submit", "--prepared-root", "/not-mounted/prepared",
+                       "--work-root", str(work_root), "--dry-run"]
+            for override, expected_batch in (([], "128"), (["--predict-batch-size", "64"], "64")):
+                result = subprocess.run(command + override, cwd=ROOT, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                stages = [json.loads(line.split(" ", 1)[1]) for line in result.stdout.splitlines()]
+                self.assertEqual([stage["stage"] for stage in stages],
+                                 ["predict-test-model-0", "create-codalab-submission"])
+                predict = stages[0]["command"]
+                self.assertEqual(predict[predict.index("--run-dir") + 1], str(run_dir.resolve()))
+                self.assertEqual(predict[predict.index("--batch-size") + 1], expected_batch)
+
     def test_training_defaults_and_overrides_reach_worker(self):
         command = [sys.executable, str(ROOT / "deployment/kaggle/runner.py"),
                    "--mode", "train", "--prepared-root", "/not-mounted/prepared",

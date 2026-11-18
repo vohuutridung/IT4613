@@ -23,6 +23,7 @@ TOKENIZER_MANIFEST = ROOT / "tokenizer_artifact.json"
 GLOVE_REPOSITORY = "https://github.com/stanfordnlp/GloVe.git"
 GLOVE_COMMIT = "52f7dbc512be3f72e9c11e7cbb19dfdfa4651e9c"
 DEFAULT_HF_REPO = "vohuutridung/IT4613-HGY"
+DEFAULT_PREDICT_BATCH_SIZE = 128
 SPLITS = ("train", "dev", "test")
 
 
@@ -469,6 +470,7 @@ class Runner:
                     "--run-dir", run_dir,
                     "--db", CANONICAL_PREPARED,
                     "--split", "test", "--profile", "test",
+                    "--batch-size", self.args.predict_batch_size,
                     "--train-dids", membership, "--output", output,
                     stage="predict-test-model-{}".format(index))
         return output
@@ -606,6 +608,8 @@ def parser():
     ap.add_argument("--effective-batch", type=int, default=TRAINING_CONFIG["effective_batch_size"])
     ap.add_argument("--batch-size", "--microbatch", dest="microbatch", type=int,
                     default=TRAINING_CONFIG["microbatch_size"], help="microbatch size per GPU")
+    ap.add_argument("--predict-batch-size", type=int, default=DEFAULT_PREDICT_BATCH_SIZE,
+                    help="test inference batch size for single, submit and ensemble-submit (default: 128)")
     ap.add_argument("--replicas", type=int, default=TRAINING_CONFIG["replicas"])
     ap.add_argument("--precision", choices=("float32", "mixed_float16"), default=TRAINING_CONFIG["precision"])
     ap.add_argument("--prefetch-batches", type=int, default=EXECUTION_CONFIG.prefetch_batches)
@@ -628,7 +632,10 @@ def parser():
 
 
 def main():
-    args = parser().parse_args()
+    ap = parser()
+    args = ap.parse_args()
+    if args.predict_batch_size < 1:
+        ap.error("--predict-batch-size must be positive")
     if args.mode in ("train", "train-ensemble", "single", "benchmark"):
         from mind_news_metadata.training_runtime import batch_layout
         batch_layout(args.effective_batch, args.microbatch, args.replicas)

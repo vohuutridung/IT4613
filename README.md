@@ -93,11 +93,12 @@ bash deployment/kaggle/run.sh \
   --partition 0 \
   --work-root /kaggle/working/mind15
 
-# Submit
+# Predict from the trained checkpoint and create the ZIP
 bash deployment/kaggle/run.sh \
   --mode submit \
   --prepared-root /kaggle/input/CHANGE_ME_PREPARED/prepared \
   --run-dir /kaggle/working/mind15/recommendation_runs/partition-0 \
+  --predict-batch-size 128 \
   --output /kaggle/working/mind15/submissions/partition-0.zip \
   --work-root /kaggle/working/mind15
 ```
@@ -165,7 +166,7 @@ Các mode:
 - `benchmark`: so sánh FP32, FP16 và FP16 + XLA trên các run độc lập.
 - `single`: train một partition rồi tạo submission.
 - `train-ensemble`: train partitions 0 đến 4.
-- `submit`: tạo submission từ một model.
+- `submit`: chạy dự đoán từ checkpoint của một model và tạo ZIP submission.
 - `ensemble-submit`: tạo ensemble submission.
 - `push-model`: upload model lên Hugging Face.
 
@@ -177,6 +178,7 @@ Tham số chính:
 - `--partition`: partition `0..4`.
 - `--effective-batch`: effective batch size.
 - `--batch-size` (alias `--microbatch`): microbatch **trên mỗi GPU**, mặc định `64`.
+- `--predict-batch-size`: batch dự đoán test cho `single`, `submit` và `ensemble-submit`, mặc định `128`. Nếu vẫn hết VRAM, thử `64`.
 - `--replicas`: số GPU cùng train một model, mặc định `2`; thiếu GPU sẽ báo lỗi.
 - `--precision`: `mixed_float16` (mặc định) hoặc `float32`.
 - `--prefetch-batches`: số batch CPU chuẩn bị trước, mặc định `2`; `0` để tắt.
