@@ -461,19 +461,25 @@ class Runner:
         if not progress_path.is_file():
             raise FileNotFoundError("run has no training_progress.json: {}".format(run_dir))
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
-        if not progress.get("full_epoch") and not self.args.allow_partial:
+        if (not progress.get("full_epoch") and not self.args.allow_partial
+                and self.args.predict_max_candidates is None):
             raise ValueError(
                 "refusing test submission from partial run {}; use --allow-partial explicitly".format(
                     run_dir))
         membership = CANONICAL_PREPARED / "membership/train_did_membership.npy"
+        suffix = "test-smoke" if self.args.predict_max_candidates is not None else "test"
         output = self.work_root / "predictions" / (
-            "model-{}-test.csv.gz".format(index))
+            "model-{}-{}.csv.gz".format(index, suffix))
+        limit_args = []
+        if self.args.predict_max_candidates is not None:
+            limit_args = ["--max-candidates", self.args.predict_max_candidates]
         self.module("mind_news_metadata.full_pipeline", "predict",
                     "--run-dir", run_dir,
                     "--db", CANONICAL_PREPARED,
                     "--split", "test", "--profile", "test",
                     "--batch-size", self.args.predict_batch_size,
                     "--train-dids", membership, "--output", output,
+                    *limit_args,
                     stage="predict-test-model-{}".format(index))
         return output
 
@@ -488,6 +494,11 @@ class Runner:
                     "partition-{}".format(self.args.partition))]
         predictions = [self._prediction(Path(run_dir), index)
                        for index, run_dir in enumerate(run_dirs)]
+        if self.args.predict_max_candidates is not None:
+            self.log.emit("SMOKE_PREDICTION_COMPLETE", candidate_limit=self.args.predict_max_candidates,
+                          predictions=[str(path) for path in predictions], full_split=False,
+                          submission_created=False)
+            return predictions
         output = Path(self.args.output).expanduser() if self.args.output else (
             self.work_root / "submissions" / (
                 "ensemble-submission.zip" if ensemble else
@@ -612,6 +623,8 @@ def parser():
                     default=TRAINING_CONFIG["microbatch_size"], help="microbatch size per GPU")
     ap.add_argument("--predict-batch-size", type=int, default=DEFAULT_PREDICT_BATCH_SIZE,
                     help="test inference batch size for single, submit and ensemble-submit (default: 128)")
+    ap.add_argument("--predict-max-candidates", type=int,
+                    help="smoke predict at most N candidates per model and finish before ZIP creation")
     ap.add_argument("--replicas", type=int, default=TRAINING_CONFIG["replicas"])
     ap.add_argument("--precision", choices=("float32", "mixed_float16"), default=TRAINING_CONFIG["precision"])
     ap.add_argument("--prefetch-batches", type=int, default=EXECUTION_CONFIG.prefetch_batches)
@@ -640,6 +653,8 @@ def main():
     args = ap.parse_args()
     if args.predict_batch_size < 1:
         ap.error("--predict-batch-size must be positive")
+    if args.predict_max_candidates is not None and args.predict_max_candidates < 1:
+        ap.error("--predict-max-candidates must be positive")
     if args.max_impressions is not None and args.max_impressions < 1:
         ap.error("--max-impressions must be positive")
     if args.mode in ("train", "train-ensemble", "single", "benchmark"):

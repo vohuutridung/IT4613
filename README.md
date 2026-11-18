@@ -179,6 +179,7 @@ Tham số chính:
 - `--effective-batch`: effective batch size.
 - `--batch-size` (alias `--microbatch`): microbatch **trên mỗi GPU**, mặc định `64`.
 - `--predict-batch-size`: batch dự đoán test cho `single`, `submit` và `ensemble-submit`, mặc định `128`. Nếu vẫn hết VRAM, thử `64`.
+- `--predict-max-candidates`: giới hạn số candidates mỗi model để smoke test predict, ví dụ `500000`. Dùng được với `--mode submit`, `single`, `ensemble-submit`. Kết quả ghi vào `predictions/model-0-test-smoke.csv.gz` (index tương ứng cho ensemble) rồi kết thúc trước bước tạo ZIP. Có thể dùng checkpoint smoke. Bỏ cờ này để chạy toàn bộ tập test và tạo submission.
 - `--replicas`: số GPU cùng train một model, mặc định `2`; thiếu GPU sẽ báo lỗi.
 - `--precision`: `mixed_float16` (mặc định) hoặc `float32`.
 - `--prefetch-batches`: số batch CPU chuẩn bị trước, mặc định `2`; `0` để tắt.
