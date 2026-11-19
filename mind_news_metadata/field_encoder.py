@@ -1,73 +1,72 @@
-"""Independent TensorFlow/Keras field representation encoder; no interaction or head."""
+"""PyTorch field representation encoder for the 15-field variant."""
 from pathlib import Path
 
-import tensorflow as tf
+import torch
+from torch import nn
 
 from .encoder_config import ENCODER_CONFIG
 from mind_config import TRAINING_CONFIG
 
 
-class MaskedAttention(tf.keras.layers.Layer):
-    def __init__(self, name=None, trainable=True):
-        super(MaskedAttention, self).__init__(name=name, trainable=trainable)
-        self.proj = tf.keras.layers.Dense(
-            ENCODER_CONFIG.attention_hidden,
-            activation=ENCODER_CONFIG.attention_activation,
-            name="attention_hidden",
-            kernel_initializer=TRAINING_CONFIG["dense_kernel_initializer"],
-            bias_initializer=TRAINING_CONFIG["dense_bias_initializer"])
-        self.score = tf.keras.layers.Dense(
-            1, use_bias=False, name="attention_score",
-            kernel_initializer=TRAINING_CONFIG["dense_kernel_initializer"])
+def make_linear(in_features, out_features, *, bias=True, trainable=True):
+    layer = nn.Linear(in_features, out_features, bias=bias)
+    nn.init.xavier_uniform_(layer.weight)
+    if layer.bias is not None:
+        nn.init.zeros_(layer.bias)
+    return layer.requires_grad_(trainable)
 
-    def call(self, values, mask):
-        scores = tf.cast(tf.squeeze(self.score(self.proj(values)), axis=-1), tf.float32)
-        mask = tf.cast(mask, tf.bool)
-        floor = tf.ones_like(scores) * tf.cast(ENCODER_CONFIG.masked_score_floor, scores.dtype)
-        scores = tf.where(mask, scores, floor)
-        weights = tf.nn.softmax(scores, axis=-1)
-        weights = weights * tf.cast(mask, weights.dtype)
-        denom = tf.reduce_sum(weights, axis=-1, keepdims=True)
-        weights = tf.math.divide_no_nan(weights, denom)
-        pooled = tf.cast(tf.reduce_sum(tf.cast(values, tf.float32)
-                                      * tf.expand_dims(weights, -1), axis=-2), values.dtype)
+
+def masked_weights(scores, mask):
+    mask = mask.bool()
+    weights = scores.float().masked_fill(~mask, ENCODER_CONFIG.masked_score_floor)
+    weights = weights.softmax(dim=-1) * mask
+    total = weights.sum(dim=-1, keepdim=True)
+    return weights / total.masked_fill(total == 0, 1)
+
+
+class MaskedAttention(nn.Module):
+    def __init__(self, trainable=True):
+        super().__init__()
+        width = ENCODER_CONFIG.attention_hidden
+        self.proj = make_linear(ENCODER_CONFIG.embedding_dim, width, trainable=trainable)
+        self.activation = getattr(torch, ENCODER_CONFIG.attention_activation)
+        self.score = make_linear(width, 1, bias=False, trainable=trainable)
+
+    def forward(self, values, mask):
+        scores = self.score(self.activation(self.proj(values))).squeeze(-1)
+        weights = masked_weights(scores, mask)
+        pooled = (values.float() * weights.unsqueeze(-1)).sum(dim=-2).to(values.dtype)
         return pooled, weights
 
 
-class DinAttention(tf.keras.layers.Layer):
-    """DIN local activation: concat(q,k,q-k,q*k), sigmoid hidden, softmax."""
-    def __init__(self, name=None, trainable=True):
+class DinAttention(nn.Module):
+    """DIN local activation over concat(q, k, q-k, q*k)."""
+    def __init__(self, trainable=True):
+        super().__init__()
         if not ENCODER_CONFIG.din_weight_normalization:
             raise NotImplementedError("only normalized masked DIN weights are implemented")
-        super(DinAttention, self).__init__(name=name, trainable=trainable)
-        self.hidden = tf.keras.layers.Dense(ENCODER_CONFIG.hidden_size,
-                                            activation=ENCODER_CONFIG.din_activation,
-                                            name="din_hidden",
-                                            kernel_initializer=TRAINING_CONFIG["dense_kernel_initializer"],
-                                            bias_initializer=TRAINING_CONFIG["dense_bias_initializer"],
-                                            trainable=trainable)
-        self.score = tf.keras.layers.Dense(1, use_bias=False, name="din_score",
-                                           kernel_initializer=TRAINING_CONFIG["dense_kernel_initializer"],
-                                           trainable=trainable)
-        self.last_query = None
-        self.last_weights = None
+        width = ENCODER_CONFIG.hidden_size
+        self.hidden = make_linear(4 * ENCODER_CONFIG.embedding_dim, width, trainable=trainable)
+        self.activation = getattr(torch, ENCODER_CONFIG.din_activation)
+        self.score = make_linear(width, 1, bias=False, trainable=trainable)
 
-    def call(self, query, keys, mask):
-        q = tf.expand_dims(query, axis=1)
-        q = tf.ones_like(keys) * q
-        interaction = tf.concat([q, keys, q - keys, q * keys], axis=-1)
-        scores = tf.cast(tf.squeeze(self.score(self.hidden(interaction)), axis=-1), tf.float32)
-        mask = tf.cast(mask, tf.bool)
-        scores = tf.where(
-            mask, scores,
-            tf.ones_like(scores) * tf.cast(ENCODER_CONFIG.masked_score_floor, scores.dtype))
-        weights = tf.nn.softmax(scores, axis=-1)
-        weights = weights * tf.cast(mask, weights.dtype)
-        weights = tf.math.divide_no_nan(weights, tf.reduce_sum(weights, axis=-1, keepdims=True))
-        result = tf.cast(tf.reduce_sum(tf.cast(keys, tf.float32)
-                                      * tf.expand_dims(weights, -1), axis=1), keys.dtype)
-        self.last_query, self.last_weights = query, weights
-        return result
+    def forward(self, query, keys, mask):
+        q = query.unsqueeze(1).expand_as(keys)
+        interaction = torch.cat([q, keys, q - keys, q * keys], dim=-1)
+        scores = self.score(self.activation(self.hidden(interaction))).squeeze(-1)
+        weights = masked_weights(scores, mask)
+        return (keys.float() * weights.unsqueeze(-1)).sum(dim=1).to(keys.dtype)
+
+
+class FeatureEmbedding(nn.Embedding):
+    def forward(self, indices):
+        values = super().forward(indices)
+        # Embedding is kept in FP32 for Adam. Cast only the looked-up values
+        # to limit memory for long histories under autocast.
+        device_type = values.device.type
+        if torch.is_autocast_enabled(device_type):
+            values = values.to(torch.get_autocast_dtype(device_type))
+        return values
 
 
 class VerifiedWordMatrix(object):
@@ -77,14 +76,14 @@ class VerifiedWordMatrix(object):
         self.manifest = manifest
 
 
-class TitleAbstractMetadataEncoder(tf.keras.Model):
+class TitleAbstractMetadataEncoder(nn.Module):
     """Active no-body variant: exactly 15 [B,100] field vectors."""
     FIELD_ORDER = tuple(ENCODER_CONFIG.field_order)
 
     def __init__(self, vocab_sizes, word_matrix=None, entity_matrix=None, type_matrix=None,
                  initializer_seed=None, initialized_test_only=False,
                  word_matrix_verified=False):
-        super(TitleAbstractMetadataEncoder, self).__init__(name=ENCODER_CONFIG.variant)
+        super().__init__()
         d = ENCODER_CONFIG.embedding_dim
         self.initialized_test_only = bool(initialized_test_only)
         if word_matrix is not None and not isinstance(word_matrix, VerifiedWordMatrix):
@@ -94,27 +93,30 @@ class TitleAbstractMetadataEncoder(tf.keras.Model):
         if word_matrix is not None and self.initialized_test_only:
             raise ValueError("initialized_test_only is reserved for synthetic fixtures without pretrained word weights")
         fixture_init = ENCODER_CONFIG.fixture_embedding_initializer
-        if initializer_seed is not None:
-            init = tf.keras.initializers.RandomUniform(
-                minval=fixture_init["minval"], maxval=fixture_init["maxval"],
-                seed=int(initializer_seed))
+        generator = None if initializer_seed is None else torch.Generator().manual_seed(initializer_seed)
+
         def emb(field, matrix=None):
             trainable_key = {"cat": "category", "sub_cat": "subcategory"}.get(field, field)
             trainable = TRAINING_CONFIG["embedding_trainable"][trainable_key]
+            rows = int(vocab_sizes[field])
+            if isinstance(matrix, VerifiedWordMatrix):
+                matrix = matrix.values
             if matrix is not None:
-                if isinstance(matrix, VerifiedWordMatrix):
-                    matrix = matrix.values
-                matrix = tf.convert_to_tensor(matrix, dtype=tf.float32)
-                if matrix.shape.ndims != 2 or int(matrix.shape[1]) != d:
+                if len(matrix.shape) != 2 or int(matrix.shape[1]) != d:
                     raise ValueError("{} pretrained matrix must have width {}".format(field, d))
-                if int(matrix.shape[0]) != int(vocab_sizes[field]):
+                if int(matrix.shape[0]) != rows:
                     raise ValueError("{} pretrained row count does not match the supplied vocabulary".format(field))
-                return tf.keras.layers.Embedding(matrix.shape[0], int(matrix.shape[1]),
-                    embeddings_initializer=tf.keras.initializers.Constant(matrix.numpy()),
-                    name=field + "_embedding", trainable=trainable)
-            return tf.keras.layers.Embedding(int(vocab_sizes[field]), d,
-                    embeddings_initializer=ENCODER_CONFIG.embedding_initializer if initializer_seed is None else init,
-                    name=field + "_embedding", trainable=trainable)
+                # Copy the read-only memmap before training can mutate its weights.
+                weights = torch.tensor(matrix, dtype=torch.float32)
+            else:
+                weights = torch.empty(rows, d)
+                if generator is None:
+                    nn.init.xavier_uniform_(weights)
+                else:
+                    nn.init.uniform_(weights, fixture_init["minval"], fixture_init["maxval"],
+                                     generator=generator)
+            return FeatureEmbedding.from_pretrained(weights, freeze=not trainable, sparse=True)
+
         self.uid_emb = emb("uid")
         self.did_emb = emb("did")
         self.cat_emb = emb("cat")
@@ -122,30 +124,24 @@ class TitleAbstractMetadataEncoder(tf.keras.Model):
         self.entity_emb = emb("entity", entity_matrix)
         self.type_emb = emb("entity_type", type_matrix)
         self.word_emb = emb("word", word_matrix)
-        self.text_pool = {name: MaskedAttention(name=name + "_pool",
-                                trainable=TRAINING_CONFIG["embedding_trainable"]["attention_and_din"])
-                          for name in ("title", "abstract")}
-        self.entity_pool = MaskedAttention(name="entity_pool",
-                                           trainable=TRAINING_CONFIG["embedding_trainable"]["attention_and_din"])
-        self.his_id_pool = MaskedAttention(name="his_id_pool",
-                                           trainable=TRAINING_CONFIG["embedding_trainable"]["attention_and_din"])
-        self.his_cat_pool = MaskedAttention(name="his_cat_pool",
-                                            trainable=TRAINING_CONFIG["embedding_trainable"]["attention_and_din"])
-        self.text_din = {name: DinAttention(
-                            name="his_" + name + "_din",
-                            trainable=TRAINING_CONFIG["embedding_trainable"]["attention_and_din"])
-                         for name in ("title", "abstract")}
-        self.entity_din = DinAttention(
-            name="his_entity_din",
-            trainable=TRAINING_CONFIG["embedding_trainable"]["attention_and_din"])
-        self.last_queries = {}
+        trainable = TRAINING_CONFIG["embedding_trainable"]["attention_and_din"]
+        self.text_pool = nn.ModuleDict({
+            name: MaskedAttention(trainable=trainable) for name in ("title", "abstract")
+        })
+        self.entity_pool = MaskedAttention(trainable=trainable)
+        self.his_id_pool = MaskedAttention(trainable=trainable)
+        self.his_cat_pool = MaskedAttention(trainable=trainable)
+        self.text_din = nn.ModuleDict({
+            name: DinAttention(trainable=trainable) for name in ("title", "abstract")
+        })
+        self.entity_din = DinAttention(trainable=trainable)
         self._has_pretrained_words = isinstance(word_matrix, VerifiedWordMatrix)
         self._has_pretrained_entity_ids = entity_matrix is not None
         self._has_pretrained_entity_types = type_matrix is not None
 
     def _text(self, ids, name):
         x = self.word_emb(ids)
-        mask = tf.not_equal(ids, ENCODER_CONFIG.pad_id)
+        mask = ids.ne(ENCODER_CONFIG.pad_id)
         return self.text_pool[name](x, mask)[0]
 
     def _entity_vectors(self, ids, types):
@@ -157,26 +153,22 @@ class TitleAbstractMetadataEncoder(tf.keras.Model):
 
     def _entity(self, ids, types):
         vec = self._entity_vectors(ids, types)
-        return self.entity_pool(vec, tf.not_equal(ids, ENCODER_CONFIG.pad_id))[0]
+        return self.entity_pool(vec, ids.ne(ENCODER_CONFIG.pad_id))[0]
 
     def _text_history(self, ids, mask, name, query):
-        shape = tf.shape(ids)
-        b, t, l = shape[0], shape[1], shape[2]
-        flat = tf.reshape(ids, [-1, l])
-        vec = self._text(flat, name)
-        vec = tf.reshape(vec, [b, t, ENCODER_CONFIG.embedding_dim])
-        self.last_queries["his_" + name] = query
+        batch, history, length = ids.shape
+        flat = ids.reshape(batch * history, length)
+        vec = self._text(flat, name).reshape(batch, history, ENCODER_CONFIG.embedding_dim)
         return self.text_din[name](query, vec, mask)
 
-    def _entity_history(self, ids, types, query, branch):
+    def _entity_history(self, ids, types, query):
         vec = self._entity_vectors(ids, types)
-        self.last_queries[branch] = query
-        return self.entity_din(query, vec, tf.not_equal(ids, ENCODER_CONFIG.pad_id))
+        return self.entity_din(query, vec, ids.ne(ENCODER_CONFIG.pad_id))
 
     def call_structured(self, f):
         raw_uid = f["uid"]
-        uid_ids = tf.where(raw_uid < int(self.uid_emb.input_dim), raw_uid,
-                           tf.ones_like(raw_uid) * int(ENCODER_CONFIG.unk_id))
+        uid_ids = raw_uid.masked_fill(raw_uid >= self.uid_emb.num_embeddings,
+                                      ENCODER_CONFIG.unk_id)
         uid = self.uid_emb(uid_ids)
         did = self.did_emb(f["did"])
         his_id_values = self.did_emb(f["his_id"])
@@ -184,19 +176,19 @@ class TitleAbstractMetadataEncoder(tf.keras.Model):
         # candidate demb at call-site, but the dependency's attention signature
         # and query use were not recovered.
         his_id = self.his_id_pool(
-            his_id_values, tf.not_equal(f["his_id"], ENCODER_CONFIG.pad_id))[0]
+            his_id_values, f["his_id"].ne(ENCODER_CONFIG.pad_id))[0]
         cat = self.cat_emb(f["cat"])
         subcat = self.subcat_emb(f["sub_cat"])
         title_ent = self._entity(f["title_entities"], f["title_entity_types"])
         abstract_ent = self._entity(f["abstract_entities"], f["abstract_entity_types"])
         his_title_ent = self._entity_history(f["his_title_merge_entities"],
-                    f["his_title_merge_entity_types"], title_ent, "his_title_merge_entities")
+                    f["his_title_merge_entity_types"], title_ent)
         his_abstract_ent = self._entity_history(f["his_abstract_merge_entities"],
-                    f["his_abstract_merge_entity_types"], abstract_ent, "his_abstract_merge_entities")
+                    f["his_abstract_merge_entity_types"], abstract_ent)
         his_cats = self.his_cat_pool(self.cat_emb(f["his_cats"]),
-                                     tf.not_equal(f["his_cats"], ENCODER_CONFIG.pad_id))[0]
+                                     f["his_cats"].ne(ENCODER_CONFIG.pad_id))[0]
         his_subcats = self.his_cat_pool(self.subcat_emb(f["his_sub_cats"]),
-                                        tf.not_equal(f["his_sub_cats"], ENCODER_CONFIG.pad_id))[0]
+                                        f["his_sub_cats"].ne(ENCODER_CONFIG.pad_id))[0]
         return {"uid": uid, "did": did, "his_id": his_id, "cat": cat,
                 "sub_cat": subcat, "title_entities": title_ent,
                 "abstract_entities": abstract_ent,
@@ -204,23 +196,21 @@ class TitleAbstractMetadataEncoder(tf.keras.Model):
                 "his_abstract_merge_entities": his_abstract_ent,
                 "his_cats": his_cats, "his_sub_cats": his_subcats}
 
-    def call(self, f, training=False):
+    def forward(self, f):
         if not self._has_pretrained_words and not self.initialized_test_only:
             raise ValueError("15-field forward requires a verified word_matrix; pass initialized_test_only=True only for synthetic smoke fixtures")
         structured = self.call_structured(f)
         cur_title = self._text(f["cur_title_tokens"], "title")
         his_title = self._text_history(f["his_title_tokens"],
-                    tf.reduce_any(tf.not_equal(f["his_title_tokens"], ENCODER_CONFIG.pad_id), axis=-1),
+                    f["his_title_tokens"].ne(ENCODER_CONFIG.pad_id).any(dim=-1),
                     "title", cur_title)
         cur_abstract = self._text(f["cur_abstract_tokens"], "abstract")
         his_abstract = self._text_history(f["his_abstract_tokens"],
-                    tf.reduce_any(tf.not_equal(f["his_abstract_tokens"], ENCODER_CONFIG.pad_id), axis=-1),
+                    f["his_abstract_tokens"].ne(ENCODER_CONFIG.pad_id).any(dim=-1),
                     "abstract", cur_abstract)
         outputs = [structured[k] for k in self.FIELD_ORDER[:11]]
         outputs += [cur_title, his_title, cur_abstract, his_abstract]
         result = dict(zip(self.FIELD_ORDER, outputs))
-        self.last_queries["his_title"] = cur_title
-        self.last_queries["his_abstract"] = cur_abstract
         if tuple(result.keys()) != self.FIELD_ORDER:
             raise AssertionError("15-field output order differs from encoder contract")
         return result

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compare FP32, FP16 and opt-in XLA using identical candidate streams.
+"""Compare FP32, FP16 and optional MLP compilation using identical candidate streams.
 
 Each case uses the full epoch's LR horizon but stops after a short prefix. Runs
-are isolated and never submitted. XLA failure is recorded without changing the
-default training path. Launch through run.sh --mode benchmark for the TF env.
+are isolated and never submitted. Compilation failure is recorded without changing the
+default training path. Launch through run.sh --mode benchmark for the PyTorch runtime.
 """
 import argparse
 import json
@@ -32,13 +32,13 @@ def main():
         ap.error("updates must exceed the 5 warmup updates")
     root = Path(args.work_root)
     cases = (("fp32", "float32", False), ("fp16", "mixed_float16", False),
-             ("fp16-xla", "mixed_float16", True))
+             ("fp16-compile", "mixed_float16", True))
     # A resumed prefix would not be comparable to the other fresh cases.
     for name, _, _ in cases:
         if (root / name).exists():
             ap.error("benchmark case already exists; choose a fresh work-root: " + str(root / name))
     rows = []
-    for name, precision, xla in cases:
+    for name, precision, compile_head in cases:
         work = root / name
         command = [sys.executable, str(ROOT / "deployment/kaggle/runner.py"),
                    "--mode", "train", "--prepared-root", args.prepared_root,
@@ -48,10 +48,10 @@ def main():
                    "--precision", precision, "--prefetch-batches", str(args.prefetch_batches),
                    "--checkpoint-every", str(args.checkpoint_every),
                    "--stop-after-updates-this-run", str(args.updates),
-                   "--train-step-xla" if xla else "--no-train-step-xla"]
+                   "--train-step-compile" if compile_head else "--no-train-step-compile"]
         print("Benchmark: " + name, flush=True)
         result = subprocess.run(command, cwd=ROOT)
-        row = {"case": name, "precision": precision, "xla": xla,
+        row = {"case": name, "precision": precision, "compile_head": compile_head,
                "exit_code": result.returncode}
         report = work / "recommendation_runs" / ("partition-" + str(args.partition)) / "training_progress.json"
         if result.returncode == 0 and report.is_file():
@@ -60,7 +60,7 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     (root / "benchmark_summary.json").write_text(json.dumps(rows, indent=2) + "\n")
     print(json.dumps(rows, indent=2))
-    return int(any(row["exit_code"] for row in rows if not row["xla"]))
+    return int(any(row["exit_code"] for row in rows if not row["compile_head"]))
 
 
 if __name__ == "__main__":

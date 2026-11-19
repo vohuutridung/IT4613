@@ -164,7 +164,7 @@
     "Attention pooling uses a 128-wide ReLU scorer and explicit masks; private dependency numerical equivalence is not claimed.",
     "Entity and type embeddings are added before pooling; the local pooling/DIN mask uses entity ID PAD. A PAD type on a real entity is not separately zeroed, matching the visible upstream addition call; private length/mask behavior and the type-PAD vector value remain unverified.",
     "Empty histories return zero vectors; padded positions get zero attention mass.",
-    "Fresh Keras initialized weights are not learned. Deterministic seeded initialization is available only for explicit fixture use.",
+    "Freshly initialized PyTorch weights are not learned. Deterministic seeded initialization is available only for explicit fixture use.",
     "No checkpoint is required for initialized forward.",
     "UID keeps full lookup IDs for traceability, but the embedding table is capped by test_start + min_uid_count; IDs beyond its row count map to UNK. The DB/vocabulary are not truncated or rebuilt.",
     "Entity matrix is locally derived from provided MIND entity_embedding.vec files; it is not the author prebuilt entity_emb.npy. Missing/special rows use seeded uniform initialization."

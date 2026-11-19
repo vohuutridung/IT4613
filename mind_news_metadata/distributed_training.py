@@ -1,162 +1,162 @@
-"""Graph accumulation with sparse embeddings and one distributed Adam update.
+"""PyTorch gradient accumulation across one or more device replicas."""
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 
-Each replica processes its share of an effective batch sequentially in a graph.
-Sparse gradients stay sparse; communication happens only after accumulation.
-Loss scaling retries the same batch on overflow, without advancing Adam or the
-sampling/LR cursors. All state needed to resume is checkpointed.
-"""
-import numpy as np
-import tensorflow as tf
+import torch
 
+from .recommendation_model import pointwise_bce_sum
 from .training_runtime import batch_layout
 
 
-def make_strategy(replicas, allow_cpu=False):
-    gpus = tf.config.list_physical_devices("GPU")
-    for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, True)
+def training_devices(replicas, allow_cpu=False):
     if replicas < 1:
         raise ValueError("replicas must be positive")
-    if len(gpus) < replicas:
-        if allow_cpu and replicas == 1:
-            return tf.distribute.OneDeviceStrategy("/CPU:0")
-        raise ValueError("requested {} GPUs, TensorFlow sees {}; use --replicas 1 "
-                         "--allow-cpu for a CPU smoke test".format(replicas, len(gpus)))
-    return tf.distribute.MirroredStrategy(
-        devices=["/GPU:{}".format(i) for i in range(replicas)])
+    visible = torch.cuda.device_count()
+    if visible >= replicas:
+        return tuple(torch.device("cuda", i) for i in range(replicas))
+    if allow_cpu and replicas == 1:
+        return (torch.device("cpu"),)
+    raise ValueError("requested {} GPUs, PyTorch sees {}; use --replicas 1 "
+                     "--allow-cpu for a CPU smoke test".format(replicas, visible))
 
 
-class LossScaleState(tf.Module):
-    def __init__(self, mixed):
-        super().__init__(name="loss_scale")
-        self.scale = tf.Variable(32768.0 if mixed else 1.0, trainable=False)
-        self.good_updates = tf.Variable(0, dtype=tf.int64, trainable=False)
+def to_tensors(features, device):
+    return {name: torch.as_tensor(values, dtype=torch.int32, device=device)
+            for name, values in features.items()}
+
+
+def autocast(device, precision):
+    return torch.autocast(device.type, dtype=torch.float16, enabled=precision == "mixed_float16")
+
+
+def replicate_model(model, device):
+    # Copy tensors directly to the target to avoid allocating a temporary
+    # copy of all embedding tables on the primary accelerator.
+    copies = {id(param): torch.nn.Parameter(param.detach().to(device, copy=True),
+                                           requires_grad=param.requires_grad)
+              for param in model.parameters()}
+    copies.update({id(buffer): buffer.to(device, copy=True) for buffer in model.buffers()})
+    return deepcopy(model, copies)
+
+
+def finite_gradients(loss, gradients):
+    checks = [loss.isfinite()]
+    checks.extend((grad.values() if grad.is_sparse else grad).isfinite().all()
+                  for grad in gradients)
+    return bool(torch.stack(checks).all().item())
 
 
 class DistributedTrainer:
-    def __init__(self, strategy, model, optimizer, effective_batch, batch_size,
-                 precision="mixed_float16", xla=False):
-        self.strategy, self.model, self.optimizer = strategy, model, optimizer
-        self.layout = batch_layout(effective_batch, batch_size, strategy.num_replicas_in_sync)
-        self.variables = tuple(model.trainable_variables)
-        self.batch_size, self.effective_batch = batch_size, effective_batch
-        self.steps = self.layout["gradient_accumulation_steps"]
+    def __init__(self, devices, model, optimizer, effective_batch, batch_size,
+                 precision="mixed_float16", compile_head=False):
+        self.devices = tuple(devices)
+        self.optimizer = optimizer
+        batch_layout(effective_batch, batch_size, len(self.devices))
+        self.models = [model, *(replicate_model(model, device) for device in self.devices[1:])]
+        self.parameters = [tuple(p for p in replica.parameters() if p.requires_grad)
+                           for replica in self.models]
+        for replica in self.models:
+            replica.train()
+            if compile_head:
+                replica.score_fields = torch.compile(replica.score_fields, dynamic=True)
+        self.pool = (ThreadPoolExecutor(max_workers=len(self.devices), thread_name_prefix="mind-train")
+                     if len(self.devices) > 1 else None)
+        self.batch_size = batch_size
+        self.effective_batch = effective_batch
+        self.precision = precision
         self.mixed = precision == "mixed_float16"
-        self.loss_scale = LossScaleState(self.mixed)
+        self.loss_scale = 32768.0 if self.mixed else 1.0
+        self.good_updates = 0
         self.overflow_retries = 0
-        self.replica_gradients = tf.function(self._replica_gradients,
-                                            jit_compile=xla, reduce_retracing=True)
-        self.compute = tf.function(self._compute, reduce_retracing=True)
-        self.apply = tf.function(self._apply, reduce_retracing=True)
+        self.updates = 0
 
-    def _micro_gradients(self, features, labels, weights, normalizer, scale):
-        with tf.GradientTape() as tape:
-            logits = tf.cast(self.model(features, training=True)["logits"], tf.float32)
-            loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(
-                labels=labels, logits=logits) * weights)
-            scaled = (loss / normalizer) * scale
-        grads = tape.gradient(scaled, self.variables)
-        if any(g is None for g in grads):
-            raise ValueError("trainable variable has no gradient")
-        return loss, grads
+    def close(self):
+        if self.pool is not None:
+            self.pool.shutdown(wait=True, cancel_futures=True)
 
-    def _replica_gradients(self, features, labels, weights, normalizer, scale):
-        def micro(index):
-            start, stop = index * self.batch_size, (index + 1) * self.batch_size
-            return self._micro_gradients(
-                {k: v[start:stop] for k, v in features.items()},
-                labels[start:stop], weights[start:stop], normalizer, scale)
+    @torch.no_grad()
+    def _sync_replicas(self):
+        for params in self.parameters[1:]:
+            for target, source in zip(params, self.parameters[0]):
+                target.copy_(source)
 
-        loss, first = micro(tf.constant(0))
-        sparse = tuple(isinstance(g, tf.IndexedSlices) for g in first)
-        state = []
-        for is_sparse, grad in zip(sparse, first):
-            if is_sparse:
-                state.append((
-                    tf.TensorArray(tf.float32, size=self.steps, infer_shape=False).write(
-                        0, tf.cast(grad.values, tf.float32)),
-                    tf.TensorArray(grad.indices.dtype, size=self.steps, infer_shape=False).write(
-                        0, grad.indices)))
-            else:
-                state.append(tf.cast(grad, tf.float32))
+    def _compute(self, index, features, labels, count):
+        model, device, params = self.models[index], self.devices[index], self.parameters[index]
+        model.zero_grad(set_to_none=True)
+        features = to_tensors(features, device)
+        labels = torch.as_tensor(labels, dtype=torch.float32, device=device)
+        loss = torch.zeros((), device=device)
+        for start in range(0, len(labels), self.batch_size):
+            stop = start + self.batch_size
+            with autocast(device, self.precision):
+                logits = model({name: v[start:stop] for name, v in features.items()})["logits"]
+            micro_loss = pointwise_bce_sum(labels[start:stop], logits)
+            (micro_loss * (self.loss_scale / count)).backward()
+            loss += micro_loss.detach()
+            # Limit accumulation to observed embedding rows, even when the
+            # same IDs recur in many histories and microbatches.
+            for param in params:
+                if param.grad is not None and param.grad.is_sparse:
+                    param.grad = param.grad.coalesce()
+        grads = tuple(param.grad for param in params)
+        if any(grad is None for grad in grads):
+            raise ValueError("trainable parameter has no gradient")
+        return loss, grads, finite_gradients(loss, grads)
 
-        def body(index, total_loss, accumulated):
-            part_loss, grads = micro(index)
-            result = []
-            for is_sparse, prior, grad in zip(sparse, accumulated, grads):
-                if is_sparse:
-                    result.append((prior[0].write(index, tf.cast(grad.values, tf.float32)),
-                                   prior[1].write(index, grad.indices)))
-                else:
-                    result.append(prior + tf.cast(grad, tf.float32))
-            return index + 1, total_loss + part_loss, tuple(result)
-
-        _, loss, state = tf.while_loop(
-            lambda index, *_: index < self.steps, body,
-            (tf.constant(1), loss, tuple(state)), parallel_iterations=1)
-        grads, checks = [], []
-        for is_sparse, value, original in zip(sparse, state, first):
-            if is_sparse:
-                values, indices = value[0].concat() / scale, value[1].concat()
-                # Coalesce locally before synchronization, without a dense
-                # vocabulary-sized gradient buffer.
-                unique, segments = tf.unique(indices)
-                values = tf.math.unsorted_segment_sum(values, segments, tf.shape(unique)[0])
-                grad = tf.IndexedSlices(values, unique, original.dense_shape)
-                checks.append(tf.reduce_all(tf.math.is_finite(values)))
-            else:
-                grad = value / scale
-                checks.append(tf.reduce_all(tf.math.is_finite(grad)))
-            grads.append(grad)
-        finite = tf.reduce_all(tf.stack(checks)) & tf.math.is_finite(loss)
-        return loss, tuple(grads), tf.cast(finite, tf.int32)
-
-    def _compute(self, features, labels, weights, normalizer, scale):
-        loss, grads, finite = self.strategy.run(
-            self.replica_gradients, args=(features, labels, weights, normalizer, scale))
-        return (self.strategy.reduce(tf.distribute.ReduceOp.SUM, loss, axis=None),
-                grads, self.strategy.reduce(tf.distribute.ReduceOp.SUM, finite, axis=None))
-
-    def _apply(self, grads):
-        def replica_apply(local_grads):
-            self.optimizer.apply_gradients(zip(local_grads, self.variables))
-        self.strategy.run(replica_apply, args=(grads,))
+    @torch.no_grad()
+    def _apply(self, results):
+        device = self.devices[0]
+        loss, gradients, _ = results[0]
+        gradients = list(gradients)
+        for other_loss, other_grads, _ in results[1:]:
+            loss = loss + other_loss.to(device)
+            for index, grad in enumerate(other_grads):
+                total = gradients[index] + grad.to(device)
+                gradients[index] = total.coalesce() if total.is_sparse else total
+        if len(results) > 1 and not finite_gradients(loss, gradients):
+            return None
+        for param, grad in zip(self.parameters[0], gradients):
+            # Adam updates momentum even for rows with zero gradient. Use a
+            # dense gradient only for the final optimizer step.
+            param.grad = grad.to_dense() if grad.is_sparse else grad
+            param.grad.div_(self.loss_scale)
+        self.optimizer.step()
+        self.updates += 1
+        for model in self.models:
+            model.zero_grad(set_to_none=True)
+        self._sync_replicas()
+        return float(loss.item())
 
     def train_batch(self, features, labels):
         count = len(labels)
         if not 0 < count <= self.effective_batch:
             raise ValueError("invalid effective batch length")
-        padding = self.effective_batch - count
-        # Only the final short batch is padded. Zero-weight rows do not enter
-        # the loss; the locked architecture has no batch norm or dropout.
-        if padding:
-            features = {k: np.pad(v, [(0, padding)] + [(0, 0)] * (v.ndim - 1))
-                        for k, v in features.items()}
-        labels = np.pad(np.asarray(labels, np.float32), (0, padding))
-        weights = np.concatenate((np.ones(count, np.float32), np.zeros(padding, np.float32)))
-        local_size = self.effective_batch // self.strategy.num_replicas_in_sync
-        def distribute(context):
-            i = int(context.replica_id_in_sync_group)
-            start, stop = i * local_size, (i + 1) * local_size
-            with tf.device(self.strategy.extended.worker_devices[i]):
-                return ({k: tf.convert_to_tensor(v[start:stop], tf.int32) for k, v in features.items()},
-                        tf.convert_to_tensor(labels[start:stop]),
-                        tf.convert_to_tensor(weights[start:stop]))
-        distributed = self.strategy.experimental_distribute_values_from_function(distribute)
+        # Each shard is contiguous. A short final batch can leave some
+        # replicas idle, and its mean is normalized by real candidates.
+        width = self.effective_batch // len(self.devices)
+        shards = [
+            (i, {k: v[start:start + width] for k, v in features.items()},
+             labels[start:start + width], count)
+            for i, start in enumerate(range(0, count, width))
+        ]
         for _ in range(32):
-            loss, grads, finite = self.compute(
-                *distributed, tf.constant(float(count)), self.loss_scale.scale.read_value())
-            if int(finite.numpy()) == self.strategy.num_replicas_in_sync:
-                self.apply(grads)
-                if self.mixed:
-                    self.loss_scale.good_updates.assign_add(1)
-                    if int(self.loss_scale.good_updates.numpy()) >= 2000:
-                        self.loss_scale.scale.assign(tf.minimum(self.loss_scale.scale * 2, 16777216.0))
-                        self.loss_scale.good_updates.assign(0)
-                return float(loss.numpy())
-            if not self.mixed or float(self.loss_scale.scale.numpy()) <= 1.0:
+            if self.pool is None:
+                results = [self._compute(*shards[0])]
+            else:
+                futures = [self.pool.submit(self._compute, *shard) for shard in shards]
+                results = [future.result() for future in futures]
+            if all(finite for _, _, finite in results):
+                loss = self._apply(results)
+                if loss is not None:
+                    if self.mixed:
+                        self.good_updates += 1
+                        if self.good_updates >= 2000:
+                            self.loss_scale = min(self.loss_scale * 2, 16777216.0)
+                            self.good_updates = 0
+                    return loss
+            if not self.mixed or self.loss_scale <= 1:
                 raise FloatingPointError("non-finite loss/gradients at loss scale 1; batch was not applied")
             self.overflow_retries += 1
-            self.loss_scale.scale.assign(tf.maximum(self.loss_scale.scale / 2, 1.0))
-            self.loss_scale.good_updates.assign(0)
+            self.loss_scale = max(self.loss_scale / 2, 1.0)
+            self.good_updates = 0
         raise FloatingPointError("loss scaling could not produce finite gradients")

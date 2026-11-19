@@ -1,4 +1,4 @@
-"""Batch assembly and bounded, ordered CPU prefetch (no TensorFlow dependency)."""
+"""Batch assembly and bounded, ordered CPU prefetch (framework-independent)."""
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 

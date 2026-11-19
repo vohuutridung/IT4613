@@ -54,14 +54,14 @@ class TrainingRuntimeTest(unittest.TestCase):
             list(effective_batches([({"id": np.zeros(1)}, {
                 "click": np.zeros(1), "labeled": np.zeros(1, np.bool_)}, [0])], 8))
 
-    def test_benchmark_records_xla_failure_and_uses_epoch_horizon(self):
+    def test_benchmark_records_compile_failure_and_uses_epoch_horizon(self):
         from scripts.benchmark_training import main
         with tempfile.TemporaryDirectory() as folder:
             def run(command, **kwargs):
                 self.assertNotIn("--max-updates", command)
                 self.assertIn("--stop-after-updates-this-run", command)
                 work = Path(command[command.index("--work-root") + 1])
-                if "--train-step-xla" in command:
+                if "--train-step-compile" in command:
                     return SimpleNamespace(returncode=1)
                 report = work / "recommendation_runs/partition-0/training_progress.json"
                 report.parent.mkdir(parents=True)

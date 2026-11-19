@@ -9,74 +9,25 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
-import tensorflow as tf
+import torch
 from tqdm.auto import tqdm
 
 from .batch_data import make_batch_store
+from .checkpoint import latest_checkpoint, load_checkpoint
+from .distributed_training import autocast, replicate_model, to_tensors
 from .full_pipeline import (DEFAULT_DB, ROOT, TRAINING_CONFIG, EXECUTION_CONFIG,
-                            _candidate_mask, _json_hash, _to_tensors,
+                            _candidate_mask, _json_hash,
                             implementation_fingerprint, iter_ordered_batches,
                             locked_artifacts, make_model)
 from .submission_format import format_impression_line, write_submission_zip
 
 
-# The pre-graph prediction implementation used by existing trained runs. Only
-# this execution-file change is compatible; model/data/protocol hashes must
-# still match byte-for-byte. Retain both fingerprints in prediction provenance.
-_LEGACY_PREDICTION_SHA256 = "b6c74236027f9afdec8675926a22035cc589400b88cc6d885669d7fe6a5b836e"
-_GRAPH_PREDICTION_SHA256 = "22ec58646aae4891bcce7ac2d613b5b90df2a7d48592789c4e8c6053225e67db"
-_PRE_PARALLEL_PIPELINE_SHA256 = "ea9f2d613dee0975e0fcb21a7760c94a985457fcc2cedb3231eeedb1f6e12172"
-
-
-def validate_inference_implementation(saved, current):
-    if saved == current:
-        return
-    path = "mind_news_metadata/prediction.py"
-    if isinstance(saved, dict) and saved.get(path) in (
-            _LEGACY_PREDICTION_SHA256, _GRAPH_PREDICTION_SHA256):
-        compatible = dict(saved)
-        compatible[path] = current.get(path)
-        pipeline = "mind_news_metadata/full_pipeline.py"
-        # This known pipeline revision differs only in the prediction CLI.
-        if saved.get(pipeline) == _PRE_PARALLEL_PIPELINE_SHA256:
-            compatible[pipeline] = current.get(pipeline)
-        if compatible == current:
-            return
-    raise ValueError("checkpoint source code fingerprint differs from current implementation")
-
-
-def make_predict_step(model, sample):
-    """One graph for all batch lengths, returning only candidate probabilities."""
-    signature = {key: tf.TensorSpec([None] + list(value.shape[1:]), tf.int32)
-                 for key, value in sample.items()}
-
-    @tf.function(input_signature=[signature])
-    def predict_step(features):
-        return model(features, training=False)["probabilities"]
-
-    predict_step.get_concrete_function()
-    # Encoder inspection attributes hold the most recent query/attention
-    # tensors. After tracing, the graph owns their lifetimes. Drop the Python
-    # references, including the eager tensors left by checkpoint warmup.
-    for layer in model.submodules:
-        if hasattr(layer, "last_queries"):
-            layer.last_queries.clear()
-        if hasattr(layer, "last_query"):
-            layer.last_query = None
-        if hasattr(layer, "last_weights"):
-            layer.last_weights = None
-    return predict_step
-
-
-def gpu_memory_snapshot(candidates, predict_step, device="GPU:0"):
-    try:
-        memory = tf.config.experimental.get_memory_info(device)
-    except (ValueError, RuntimeError):
+def gpu_memory_snapshot(candidates, device):
+    if device.type != "cuda":
         return None
-    snapshot = {"device": device, "candidates": candidates,
-                "current_mib": round(memory["current"] / (1024 ** 2), 1),
-                "peak_mib": round(memory["peak"] / (1024 ** 2), 1),
-                "graph_traces": predict_step.experimental_get_tracing_count()}
+    snapshot = {"device": str(device), "candidates": candidates,
+                "current_mib": round(torch.cuda.memory_allocated(device) / (1024 ** 2), 1),
+                "peak_mib": round(torch.cuda.max_memory_allocated(device) / (1024 ** 2), 1)}
     print("[predict-memory] " + json.dumps(snapshot), flush=True)
     return snapshot
 
@@ -84,30 +35,27 @@ def gpu_memory_snapshot(candidates, predict_step, device="GPU:0"):
 def prediction_devices(replicas):
     if replicas < 1:
         raise ValueError("prediction replica count must be positive")
-    gpus = tf.config.list_physical_devices("GPU")
-    if replicas == 1 and not gpus:
-        return ["/CPU:0"]
-    if len(gpus) < replicas:
-        raise ValueError("predict requested {} GPUs, TensorFlow sees {}; check "
-                         "CUDA_VISIBLE_DEVICES and the Kaggle accelerator".format(replicas, len(gpus)))
-    return ["/GPU:{}".format(index) for index in range(replicas)]
+    visible = torch.cuda.device_count()
+    if replicas == 1 and not visible:
+        return [torch.device("cpu")]
+    if visible < replicas:
+        raise ValueError("predict requested {} GPUs, PyTorch sees {}; check "
+                         "CUDA_VISIBLE_DEVICES and the selected accelerator".format(replicas, visible))
+    return [torch.device("cuda", index) for index in range(replicas)]
 
 
 class ParallelPredictor:
-    """Persistent graphs and workers, with one independent model per device.
+    """Persistent workers, with one independent model per device.
 
     NumPy features are split on the host. Workers transfer only their shard to
     their device and synchronize their own probabilities. Results are joined
     in input order, regardless of worker completion order.
     """
-    def __init__(self, models, devices, sample):
+    def __init__(self, models, devices):
         if not models or len(models) != len(devices):
             raise ValueError("each prediction device must have its own model")
         self.devices = list(devices)
-        self.steps = []
-        for model, device in zip(models, devices):
-            with tf.device(device):
-                self.steps.append(make_predict_step(model, sample))
+        self.models = [model.eval() for model in models]
         self.pool = (ThreadPoolExecutor(max_workers=len(devices), thread_name_prefix="mind-predict")
                      if len(devices) > 1 else None)
 
@@ -119,28 +67,28 @@ class ParallelPredictor:
             self.pool.shutdown(wait=True, cancel_futures=True)
 
     @staticmethod
-    def _forward(step, device, features):
-        with tf.device(device):
-            return step(_to_tensors(features)).numpy()
+    def _forward(model, device, features):
+        precision = getattr(model, "inference_precision", "float32")
+        with torch.inference_mode(), autocast(device, precision):
+            return model(to_tensors(features, device))["probabilities"].cpu().numpy()
 
     def __call__(self, features):
         if self.pool is None:
-            return self._forward(self.steps[0], self.devices[0], features)
+            return self._forward(self.models[0], self.devices[0], features)
         count = len(next(iter(features.values())))
         width, extra = divmod(count, len(self.devices))
         futures = []
         start = 0
-        for index, (step, device) in enumerate(zip(self.steps, self.devices)):
+        for index, (model, device) in enumerate(zip(self.models, self.devices)):
             stop = start + width + int(index < extra)
             if stop > start:
                 shard = {key: value[start:stop] for key, value in features.items()}
-                futures.append(self.pool.submit(self._forward, step, device, shard))
+                futures.append(self.pool.submit(self._forward, model, device, shard))
             start = stop
         return np.concatenate([future.result() for future in futures])
 
     def memory_snapshot(self, candidates):
-        snapshots = {device.lstrip("/"): gpu_memory_snapshot(candidates, step, device.lstrip("/"))
-                     for device, step in zip(self.devices, self.steps)}
+        snapshots = {str(device): gpu_memory_snapshot(candidates, device) for device in self.devices}
         if len(self.devices) == 1:
             return next(iter(snapshots.values()))
         return snapshots
@@ -154,56 +102,46 @@ def file_sha256(path):
     return h.hexdigest()
 
 
-def checkpoint_digest(prefix):
-    prefix = str(prefix)
-    files = sorted(Path(prefix).parent.glob(Path(prefix).name + ".*"))
-    h = hashlib.sha256()
-    items = []
-    for path in files:
-        part_hash = hashlib.sha256()
-        with path.open("rb") as source:
-            for block in iter(lambda: source.read(1 << 20), b""):
-                part_hash.update(block)
-        part = part_hash.hexdigest()
-        items.append({"path": str(path), "sha256": part, "bytes": path.stat().st_size})
-        h.update(path.name.encode()); h.update(bytes.fromhex(part))
-    return {"sha256": h.hexdigest(), "files": items}
+def checkpoint_digest(path):
+    path = Path(path)
+    digest = file_sha256(path)
+    return {"sha256": digest, "files": [
+        {"path": str(path), "sha256": digest, "bytes": path.stat().st_size}
+    ]}
 
 
-def load_run(run_dir, db_path=DEFAULT_DB):
+def load_run(run_dir, db_path=DEFAULT_DB, device=None):
     run_dir = Path(run_dir)
+    device = prediction_devices(1)[0] if device is None else device
+    path = latest_checkpoint(run_dir)
+    if path is None:
+        raise ValueError("no PyTorch checkpoint found")
     requested_db_path = Path(db_path).expanduser()
     config = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+    saved = config.get("config", {})
+    if saved.get("framework") != "pytorch" or _json_hash(saved) != config.get("config_sha256"):
+        raise ValueError("invalid PyTorch run configuration or fingerprint")
     current_identity = locked_artifacts(requested_db_path)
-    current_inputs = current_identity["fingerprint"]
-    if config.get("config", {}).get("inputs") != current_inputs:
+    if saved.get("inputs") != current_identity["fingerprint"]:
         raise ValueError("checkpoint input DB/mapping/artifact fingerprint differs from current files")
     current_implementation = implementation_fingerprint()
-    validate_inference_implementation(
-        config.get("config", {}).get("implementation_fingerprint"), current_implementation)
-    dynamic = {"effective_batch_size", "microbatch_size", "replicas", "precision", "train_step_xla"}
+    if saved.get("implementation_fingerprint") != current_implementation:
+        raise ValueError("checkpoint source code fingerprint differs from current implementation")
+    dynamic = {"effective_batch_size", "microbatch_size", "replicas", "precision", "train_step_compile"}
     for key, value in TRAINING_CONFIG.items():
-        if key in dynamic:
-            continue
-        if config.get("config", {}).get(key) != value:
+        if key not in dynamic and saved.get(key) != value:
             raise ValueError("checkpoint model/protocol contract differs at {}".format(key))
-    tf.keras.mixed_precision.set_global_policy(config["config"].get("precision", "float32"))
     db_path = requested_db_path.resolve(strict=True)
-    model, store, word_manifest = make_model(db_path)
+    model, store, _ = make_model(db_path)
     if Path(store.db_path).resolve(strict=True) != db_path:
         raise ValueError("inference loader opened a different database than the fingerprinted DB")
-    sample, _, _ = store.batch("dev", limit=1)
-    model(_to_tensors(sample), training=False)
-    prefix = tf.train.latest_checkpoint(str(run_dir / "checkpoints"))
-    if prefix is None:
-        raise ValueError("no TensorFlow checkpoint found")
-    ckpt = tf.train.Checkpoint(model=model)
-    status = ckpt.restore(prefix)
-    status.assert_existing_objects_matched()
-    status.expect_partial()  # optimizer slots are intentionally unused for inference
+    state = load_checkpoint(path, config["config_sha256"])
+    model.load_state_dict(state["model"], strict=True)
+    model.to(device).eval()
+    model.inference_precision = saved.get("precision", "float32")
     config["current_database_location"] = current_identity["location"]
     config["inference_implementation_fingerprint"] = current_implementation
-    return model, store, prefix, config
+    return model, store, str(path), config
 
 
 def train_did_set(path, expected_database):
@@ -242,16 +180,11 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
     if max_candidates is not None and max_candidates < 1:
         raise ValueError("prediction candidate limit must be positive")
     devices = prediction_devices(replicas)
-    models = []
-    for device in devices:
-        with tf.device(device):
-            model, replica_store, replica_prefix, replica_config = load_run(run_dir, db_path)
-        if not models:
-            store, prefix, run_config = replica_store, replica_prefix, replica_config
-        elif (replica_prefix != prefix or replica_config["config_sha256"] != run_config["config_sha256"]):
-            raise ValueError("checkpoint changed while loading prediction replicas")
-        models.append(model)
-    print(json.dumps({"prediction_devices": devices, "replicas": replicas,
+    model, store, prefix, run_config = load_run(run_dir, db_path, device=devices[0])
+    checkpoint = checkpoint_digest(prefix)
+    models = [model, *(replicate_model(model, device) for device in devices[1:])]
+    device_names = [str(device) for device in devices]
+    print(json.dumps({"prediction_devices": device_names, "replicas": replicas,
                       "global_batch_size": batch_size,
                       "max_batch_size_per_device": (batch_size + replicas - 1) // replicas}), flush=True)
     train_dids = (train_did_set(train_dids_path, run_config["config"]["inputs"]["database"])
@@ -286,7 +219,7 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
                 raise ValueError("labeled split contains unlabeled rows")
             features = _candidate_mask(features, meta, profile, train_dids)
             if predictor is None:
-                predictor = resources.enter_context(ParallelPredictor(models, devices, features))
+                predictor = resources.enter_context(ParallelPredictor(models, devices))
             probs = predictor(features)
             if probs.shape != (take,):
                 raise ValueError("prediction returned {} probabilities for {} candidates".format(
@@ -307,15 +240,15 @@ def predict(run_dir, split="test", profile="test", train_dids_path=None,
     manifest = {"status": "LOCAL_PREDICTIONS_WRITTEN" if max_candidates is None else "PILOT_ONLY_PARTIAL_PREDICTIONS",
                 "full_split": max_candidates is None, "split": split,
                 "mask_profile": profile, "rows": count, "output": str(out_path),
-                "checkpoint_prefix": prefix, "checkpoint": checkpoint_digest(prefix),
+                "checkpoint_prefix": prefix, "checkpoint": checkpoint,
                 "run_config_sha256": run_config["config_sha256"],
                 "model_contract_sha256": _json_hash(TRAINING_CONFIG),
                 "input_artifact_fingerprint": run_config["config"]["inputs"],
                 "database_location": run_config.get("current_database_location"),
                 "implementation_fingerprint": run_config["config"]["implementation_fingerprint"],
                 "inference_implementation_fingerprint": run_config["inference_implementation_fingerprint"],
-                "inference_execution": {"mode": "tf.function", "batch_size": batch_size,
-                                        "replicas": replicas, "devices": devices,
+                "inference_execution": {"mode": "torch.inference_mode", "batch_size": batch_size,
+                                        "replicas": replicas, "devices": device_names,
                                         "batch_size_semantics": "global across prediction devices",
                                         "first_memory": first_memory, "last_memory": last_memory},
                 "field_order": list(TRAINING_CONFIG["field_order"]),

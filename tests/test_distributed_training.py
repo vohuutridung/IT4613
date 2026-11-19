@@ -1,159 +1,52 @@
-"""Run with TF 2.15.1; uses two logical CPUs unless MIND_TEST_GPUS=1.
-
-Checks distributed sparse Adam against a single full-batch reference, including
-duplicate embedding indices, short batches, mixed precision, and checkpoint
-continuation. Run this file in a fresh process so CPU devices can be configured.
-"""
+"""Exercise single- and two-replica PyTorch paths on CPU or CUDA."""
 import importlib.util
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 import numpy as np
 
-HAS_TF = importlib.util.find_spec("tensorflow") is not None
-if HAS_TF:
-    import tensorflow as tf
-    if os.environ.get("MIND_TEST_GPUS") == "1":
-        gpus = tf.config.list_physical_devices("GPU")
-        if len(gpus) < 2:
-            raise RuntimeError("MIND_TEST_GPUS=1 requires two visible GPUs")
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        DEVICES = ["/GPU:0", "/GPU:1"]
-    else:
-        cpu = tf.config.list_physical_devices("CPU")[0]
-        tf.config.set_logical_device_configuration(cpu, [
-            tf.config.LogicalDeviceConfiguration(), tf.config.LogicalDeviceConfiguration()])
-        DEVICES = ["/CPU:0", "/CPU:1"]
-    from mind_news_metadata.distributed_training import DistributedTrainer
-    from mind_news_metadata.field_encoder import MaskedAttention, DinAttention
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+if HAS_TORCH:
+    import torch
+    from torch import nn
 
-    class TinyModel(tf.keras.Model):
+    from mind_news_metadata.checkpoint import latest_checkpoint, load_checkpoint
+    from mind_news_metadata.distributed_training import DistributedTrainer, replicate_model, to_tensors
+    from mind_news_metadata.field_encoder import DinAttention, MaskedAttention, TitleAbstractMetadataEncoder
+    from mind_news_metadata.prediction import ParallelPredictor
+    from mind_news_metadata.recommendation_model import NoBodyRecommendationModel, pointwise_bce_sum
+
+    if os.environ.get("MIND_TEST_GPUS") == "1":
+        if torch.cuda.device_count() < 2:
+            raise RuntimeError("MIND_TEST_GPUS=1 requires two visible GPUs")
+        DEVICES = (torch.device("cuda", 0), torch.device("cuda", 1))
+    else:
+        DEVICES = (torch.device("cpu"), torch.device("cpu"))
+
+    class TinyModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.embedding = tf.keras.layers.Embedding(13, 4,
-                embeddings_initializer=tf.keras.initializers.RandomUniform(seed=12))
-            self.head = tf.keras.layers.Dense(1, dtype="float32",
-                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=13))
+            self.embedding = nn.Embedding(13, 4, sparse=True)
+            self.head = nn.Linear(4, 1)
 
-        def call(self, features, training=False):
-            value = tf.reduce_sum(self.embedding(features["ids"]), axis=1)
-            return {"logits": tf.squeeze(self.head(value), axis=-1)}
+        def forward(self, features):
+            logits = self.head(self.embedding(features["ids"]).sum(dim=1)).squeeze(-1)
+            return {"logits": logits, "probabilities": logits.float().sigmoid()}
 
 
-@unittest.skipUnless(HAS_TF, "TensorFlow 2.15.1 is required")
+@unittest.skipUnless(HAS_TORCH, "PyTorch is required")
 class DistributedTrainingTest(unittest.TestCase):
-    def tearDown(self):
-        tf.keras.mixed_precision.set_global_policy("float32")
-
-    def test_inference_accepts_only_the_known_execution_migration(self):
-        from mind_news_metadata.prediction import (
-            _LEGACY_PREDICTION_SHA256, _GRAPH_PREDICTION_SHA256,
-            _PRE_PARALLEL_PIPELINE_SHA256, validate_inference_implementation)
-        path = "mind_news_metadata/prediction.py"
-        saved = {path: _LEGACY_PREDICTION_SHA256, "model.py": "original"}
-        current = {path: "updated", "model.py": "original"}
-        validate_inference_implementation(saved, current)
-        validate_inference_implementation(current, current)
-        pipeline = "mind_news_metadata/full_pipeline.py"
-        for prediction_hash in (_LEGACY_PREDICTION_SHA256, _GRAPH_PREDICTION_SHA256):
-            validate_inference_implementation(
-                {path: prediction_hash, pipeline: _PRE_PARALLEL_PIPELINE_SHA256, "model.py": "original"},
-                {path: "updated", pipeline: "parallel-predict-cli", "model.py": "original"})
-        with self.assertRaisesRegex(ValueError, "fingerprint"):
-            validate_inference_implementation(
-                {path: _GRAPH_PREDICTION_SHA256, pipeline: "unknown", "model.py": "original"},
-                {path: "updated", pipeline: "parallel-predict-cli", "model.py": "original"})
-        for incompatible in (None, {path: "unknown", "model.py": "original"},
-                             {path: _LEGACY_PREDICTION_SHA256, "model.py": "changed"}):
-            with self.assertRaisesRegex(ValueError, "fingerprint"):
-                validate_inference_implementation(incompatible, current)
-
-    def test_prediction_graph_parity_single_trace_and_memory(self):
-        from test_kaggle_workflow import CompactStoreTest
-        from mind_news_metadata.compact_data import CompactNewsBatchStore
-        from mind_news_metadata.field_encoder import TitleAbstractMetadataEncoder
-        from mind_news_metadata.recommendation_model import NoBodyRecommendationModel
-        from mind_news_metadata.prediction import make_predict_step
-        tf.keras.mixed_precision.set_global_policy("mixed_float16")
-        with tempfile.TemporaryDirectory() as folder, tf.device(DEVICES[0]):
-            store = CompactNewsBatchStore(CompactStoreTest()._fixture(Path(folder)))
-            features, _, _ = store.batch("train", limit=3)
-            encoder = TitleAbstractMetadataEncoder(store.vocab_sizes(),
-                initialized_test_only=True, initializer_seed=12)
-            model = NoBodyRecommendationModel(encoder)
-            expected = model(features, training=False)["probabilities"].numpy()
-            step = make_predict_step(model, features)
-            self.assertEqual(dict(encoder.last_queries), {})
-            self.assertIsNone(encoder.entity_din.last_weights)
-            for count in (3, 1, 2, 3):
-                batch = {k: tf.convert_to_tensor(v[:count]) for k, v in features.items()}
-                np.testing.assert_allclose(step(batch).numpy(), expected[:count], rtol=2e-3, atol=2e-4)
-            self.assertEqual(step.experimental_get_tracing_count(), 1)
-            if os.environ.get("MIND_TEST_PREDICT_STRESS") == "1":
-                if not DEVICES[0].startswith("/GPU"):
-                    self.skipTest("prediction memory stress requires MIND_TEST_GPUS=1")
-                batch = {k: tf.convert_to_tensor(np.tile(v, (22,) + (1,) * (v.ndim - 1))[:64])
-                         for k, v in features.items()}
-                for _ in range(100):
-                    step(batch).numpy()
-                baseline = tf.config.experimental.get_memory_info("GPU:0")["current"]
-                for _ in range(6500):  # 416,000 candidates, beyond the observed OOM point
-                    step(batch).numpy()
-                final = tf.config.experimental.get_memory_info("GPU:0")["current"]
-                self.assertLess(final - baseline, 64 * 1024 ** 2)
-
-    def test_parallel_prediction_preserves_order_and_short_batches(self):
-        from mind_news_metadata.prediction import ParallelPredictor, make_predict_step
-
-        class PredictModel(tf.keras.Model):
-            def __init__(self):
-                super().__init__()
-                self.head = tf.keras.layers.Dense(1, dtype="float32")
-
-            def call(self, features, training=False):
-                return {"probabilities": tf.squeeze(self.head(tf.cast(features["ids"], tf.float32)), -1)}
-
-        models = []
-        for device in DEVICES:
-            with tf.device(device):
-                model = PredictModel()
-                model({"ids": tf.zeros([1, 3], tf.int32)})
-                model.set_weights([np.asarray([[1], [10], [100]], np.float32), np.zeros(1, np.float32)])
-                models.append(model)
-        sample = {"ids": np.arange(24, dtype=np.int32).reshape(8, 3)}
-        with tf.device(DEVICES[0]):
-            reference = make_predict_step(models[0], sample)
-        with ParallelPredictor(models, DEVICES, sample) as parallel:
-            for count in (8, 7, 1, 3, 8):
-                features = {"ids": sample["ids"][:count]}
-                np.testing.assert_array_equal(parallel(features), reference(features).numpy())
-            self.assertEqual([step.experimental_get_tracing_count() for step in parallel.steps], [1, 1])
-            # The barrier requires both workers to be in forward concurrently.
-            # This catches a sequential implementation that joins too early.
-            from threading import Barrier
-            barrier = Barrier(2)
-            def concurrent_step(features):
-                barrier.wait(timeout=10)
-                return tf.cast(features["ids"][:, 0], tf.float32)
-            parallel.steps = [concurrent_step, concurrent_step]
-            np.testing.assert_array_equal(parallel(sample), sample["ids"][:, 0])
-        with self.assertRaises(RuntimeError):
-            parallel(sample)  # executor shutdown on context exit
-
-    def build(self, replicas=2, precision="float32", xla=False):
-        tf.keras.mixed_precision.set_global_policy(precision)
-        strategy = tf.distribute.MirroredStrategy(devices=DEVICES[:replicas])
-        with strategy.scope():
-            model = TinyModel()
-            model({"ids": tf.zeros([1, 3], tf.int32)})
-            optimizer = tf.keras.optimizers.Adam(0.001, jit_compile=False)
-            optimizer.build(model.trainable_variables)
-        trainer = DistributedTrainer(strategy, model, optimizer, 24, 4,
-                                     precision=precision, xla=xla)
+    def build(self, replicas=2, precision="float32"):
+        torch.manual_seed(12)
+        model = TinyModel().to(DEVICES[0])
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        trainer = DistributedTrainer(DEVICES[:replicas], model, optimizer, 24, 4,
+                                     precision=precision)
+        self.addCleanup(trainer.close)
         return model, optimizer, trainer
 
     @staticmethod
@@ -161,95 +54,116 @@ class DistributedTrainingTest(unittest.TestCase):
         return {"ids": (np.arange(count * 3).reshape(count, 3) % 7).astype(np.int32)}, (
             np.arange(count) % 2).astype(np.float32)
 
+    def test_parallel_prediction_preserves_order_and_short_batches(self):
+        class PredictModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.barrier = None
+
+            def forward(self, features):
+                if self.barrier:
+                    self.barrier.wait(timeout=10)
+                return {"probabilities": features["ids"][:, 0].float()}
+
+        sample = np.arange(24, dtype=np.int32).reshape(8, 3)
+        models = [PredictModel().to(device) for device in DEVICES]
+        with ParallelPredictor(models, DEVICES) as parallel:
+            for count in (8, 7, 1, 3, 8):
+                features = {"ids": sample[:count]}
+                np.testing.assert_array_equal(parallel(features), sample[:count, 0])
+            # Both workers must enter forward before either can finish.
+            barrier = Barrier(2)
+            for model in models:
+                model.barrier = barrier
+            np.testing.assert_array_equal(parallel({"ids": sample}), sample[:, 0])
+        with self.assertRaises(RuntimeError):
+            parallel({"ids": sample})
+
     def test_sparse_distributed_adam_matches_full_batch(self):
-        model, optimizer, trainer = self.build()
-        reference, ref_optimizer, ref_trainer = self.build(replicas=1)
-        reference.set_weights(model.get_weights())
-        # Count=1 leaves the second replica with exclusively zero-weight padding.
+        model, _, trainer = self.build()
+        reference, optimizer, _ = self.build(replicas=1)
+        reference.load_state_dict(model.state_dict())
         for count in (24, 19, 1, 24):
             x, y = self.batch(count)
-            with tf.GradientTape() as tape:
-                logits = reference(x)["logits"]
-                loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=y, logits=logits))
-            grads = tape.gradient(loss, reference.trainable_variables)
-            # Apply the reference under its own strategy, with one replica.
-            ref_trainer.strategy.run(
-                lambda: ref_optimizer.apply_gradients(zip(grads, reference.trainable_variables)))
-            actual_loss = trainer.train_batch(x, y) / count
-            self.assertAlmostEqual(actual_loss, float(loss.numpy()), places=5)
-            for actual, expected in zip(model.get_weights(), reference.get_weights()):
-                np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
-        self.assertEqual(int(optimizer.iterations.numpy()), 4)
+            optimizer.zero_grad(set_to_none=True)
+            logits = reference(to_tensors(x, DEVICES[0]))["logits"]
+            loss = pointwise_bce_sum(torch.as_tensor(y, device=DEVICES[0]), logits) / count
+            loss.backward()
+            reference.embedding.weight.grad = reference.embedding.weight.grad.to_dense()
+            optimizer.step()
+            self.assertAlmostEqual(trainer.train_batch(x, y) / count, loss.item(), places=5)
+            for actual, expected in zip(model.parameters(), reference.parameters()):
+                torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+        self.assertEqual(trainer.updates, 4)
 
     def test_mixed_precision_and_empty_attention_are_finite(self):
-        model, optimizer, trainer = self.build(precision="mixed_float16")
+        _, _, trainer = self.build(precision="mixed_float16")
         x, y = self.batch(19)
         self.assertTrue(np.isfinite(trainer.train_batch(x, y)))
-        self.assertEqual(int(optimizer.iterations.numpy()), 1)
-        values = tf.zeros([2, 3, 100], tf.float16)
-        mask = tf.zeros([2, 3], tf.bool)
-        pooled, weights = MaskedAttention()(values, mask)
-        din = DinAttention()(tf.zeros([2, 100], tf.float16), values, mask)
-        np.testing.assert_array_equal(pooled.numpy(), 0)
-        np.testing.assert_array_equal(weights.numpy(), 0)
-        np.testing.assert_array_equal(din.numpy(), 0)
+        self.assertEqual(trainer.updates, 1)
+        device = DEVICES[0]
+        values = torch.zeros((2, 3, 100), device=device, dtype=torch.float16)
+        mask = torch.zeros((2, 3), device=device, dtype=torch.bool)
+        with torch.autocast(device.type, dtype=torch.float16):
+            pooled, weights = MaskedAttention().to(device)(values, mask)
+            din = DinAttention().to(device)(values[:, 0], values, mask)
+        for tensor in (pooled, weights, din):
+            torch.testing.assert_close(tensor, torch.zeros_like(tensor))
 
-    def test_checkpoint_continuation_matches_uninterrupted(self):
-        model, opt, trainer = self.build(precision="mixed_float16")
-        x, y = self.batch(24)
-        trainer.train_batch(x, y)
-        with tempfile.TemporaryDirectory() as folder:
-            prefix = tf.train.Checkpoint(model=model, optimizer=opt, loss_scale=trainer.loss_scale).save(folder + "/ckpt")
-            trainer.train_batch(x, y)
-            expected = model.get_weights()
-            restored, restored_opt, restored_trainer = self.build(precision="mixed_float16")
-            tf.train.Checkpoint(model=restored, optimizer=restored_opt,
-                                loss_scale=restored_trainer.loss_scale).restore(prefix).assert_consumed()
-            restored_trainer.train_batch(x, y)
-            for actual, target in zip(restored.get_weights(), expected):
-                np.testing.assert_allclose(actual, target, rtol=2e-5, atol=2e-6)
-            self.assertEqual(int(restored_opt.iterations.numpy()), 2)
-
-    def test_full_15field_model_mixed_precision_step(self):
+    def test_full_15field_model_mixed_precision_step_and_prediction(self):
         from test_kaggle_workflow import CompactStoreTest
         from mind_news_metadata.compact_data import CompactNewsBatchStore
-        from mind_news_metadata.field_encoder import TitleAbstractMetadataEncoder
-        from mind_news_metadata.recommendation_model import NoBodyRecommendationModel
+
         with tempfile.TemporaryDirectory() as folder:
             store = CompactNewsBatchStore(CompactStoreTest()._fixture(Path(folder)))
             features, labels, _ = store.batch("train", limit=3)
-            tf.keras.mixed_precision.set_global_policy("mixed_float16")
-            strategy = tf.distribute.MirroredStrategy(devices=DEVICES)
-            with strategy.scope():
-                encoder = TitleAbstractMetadataEncoder(store.vocab_sizes(),
-                    initialized_test_only=True, initializer_seed=12)
-                model = NoBodyRecommendationModel(encoder)
-                model({k: tf.convert_to_tensor(v) for k, v in features.items()})
-                optimizer = tf.keras.optimizers.Adam(0.001, jit_compile=False)
-                optimizer.build(model.trainable_variables)
-            trainer = DistributedTrainer(strategy, model, optimizer, 4, 1)
+            encoder = TitleAbstractMetadataEncoder(store.vocab_sizes(),
+                initialized_test_only=True, initializer_seed=12)
+            device = DEVICES[0]
+            model = NoBodyRecommendationModel(encoder).to(device)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            trainer = DistributedTrainer(DEVICES, model, optimizer, 4, 1)
+            self.addCleanup(trainer.close)
             self.assertTrue(np.isfinite(trainer.train_batch(features, labels["click"])))
-            self.assertEqual(int(optimizer.iterations.numpy()), 1)
+            self.assertEqual(trainer.updates, 1)
+            model.inference_precision = "mixed_float16"
+            with ParallelPredictor([model], DEVICES[:1]) as single:
+                expected = single(features)
+            if os.environ.get("MIND_TEST_PREDICT_STRESS") == "1" and device.type == "cuda":
+                batch = {name: np.tile(v, (22,) + (1,) * (v.ndim - 1))[:64]
+                         for name, v in features.items()}
+                with ParallelPredictor([model], DEVICES[:1]) as single:
+                    for _ in range(100):
+                        single(batch)
+                    baseline = torch.cuda.memory_allocated(device)
+                    for _ in range(6500):
+                        single(batch)
+                    self.assertLess(torch.cuda.memory_allocated(device) - baseline, 64 * 1024 ** 2)
+            with ParallelPredictor([model, replicate_model(model, DEVICES[1])], DEVICES) as parallel:
+                for count in (3, 1, 2, 3):
+                    batch = {k: v[:count] for k, v in features.items()}
+                    np.testing.assert_allclose(parallel(batch), expected[:count], rtol=2e-3, atol=2e-4)
 
     def test_overflow_retries_without_advancing_adam(self):
-        _, optimizer, trainer = self.build(precision="mixed_float16")
-        original = trainer.compute
+        _, optimizer, trainer = self.build(replicas=1, precision="mixed_float16")
+        original = trainer._compute
         attempts = []
+
         def overflow_once(*args):
-            attempts.append(int(optimizer.iterations.numpy()))
+            attempts.append(bool(optimizer.state))
             loss, grads, finite = original(*args)
-            if len(attempts) == 1:
-                finite = tf.constant(0)
-            return loss, grads, finite
-        trainer.compute = overflow_once
+            return loss, grads, finite and len(attempts) > 1
+
+        trainer._compute = overflow_once
         x, y = self.batch(24)
         trainer.train_batch(x, y)
-        self.assertEqual(attempts[0:2], [0, 0])
-        self.assertEqual(int(optimizer.iterations.numpy()), 1)
+        self.assertEqual(attempts[:2], [False, False])
+        self.assertEqual(trainer.updates, 1)
         self.assertGreaterEqual(trainer.overflow_retries, 1)
 
     def test_pipeline_resume_preserves_candidates_and_optimizer(self):
         from mind_news_metadata.full_pipeline import run_train
+        from mind_news_metadata.prediction import load_run
 
         class Store:
             compact = True
@@ -279,11 +193,10 @@ class DistributedTrainingTest(unittest.TestCase):
             def model_factory(db):
                 return TinyModel(), Store(db), {"matrix_sha256": "fixture"}
             identity = {"fingerprint": {"fixture": True}, "location": {"fixture": True}}
-            with patch("mind_news_metadata.full_pipeline.make_strategy",
-                       side_effect=lambda *a, **k: tf.distribute.MirroredStrategy(devices=DEVICES)), patch(
+            with patch("mind_news_metadata.full_pipeline.training_devices", return_value=DEVICES), patch(
                     "mind_news_metadata.full_pipeline.make_model", side_effect=model_factory), patch(
                     "mind_news_metadata.full_pipeline.locked_artifacts", return_value=identity):
-                options = dict(effective_batch=24, microbatch=4, replicas=2, precision="float32",
+                options = dict(effective_batch=24, microbatch=4, replicas=2, precision="mixed_float16",
                                db_path=root, checkpoint_every=1, prefetch=2)
                 complete = run_train(output_dir=root / "complete", **options)
                 first = run_train(output_dir=root / "resume", stop_after_updates_this_run=1, **options)
@@ -293,17 +206,20 @@ class DistributedTrainingTest(unittest.TestCase):
             self.assertEqual(resumed["optimizer_iterations"], 3)
             self.assertEqual(resumed["sampling_cursor_last_candidate_key"],
                              complete["sampling_cursor_last_candidate_key"])
-            a = tf.train.load_checkpoint(complete["latest_checkpoint"])
-            b = tf.train.load_checkpoint(resumed["latest_checkpoint"])
-            for key in a.get_variable_to_shape_map():
-                if key.startswith(("model/", "optimizer/")):
-                    np.testing.assert_allclose(a.get_tensor(key), b.get_tensor(key), rtol=2e-5, atol=2e-6)
-
-    @unittest.skipUnless(os.environ.get("MIND_TEST_XLA") == "1", "opt-in XLA compatibility test")
-    def test_xla_sparse_step(self):
-        _, _, trainer = self.build(xla=True)
-        x, y = self.batch(24)
-        self.assertTrue(np.isfinite(trainer.train_batch(x, y)))
+            a = load_checkpoint(complete["latest_checkpoint"], complete["config_sha256"])
+            b = load_checkpoint(resumed["latest_checkpoint"], resumed["config_sha256"])
+            torch.testing.assert_close(a["model"], b["model"])
+            torch.testing.assert_close(a["optimizer"], b["optimizer"])
+            self.assertEqual(a["loss_scale"], b["loss_scale"])
+            self.assertEqual(a["loss_scale_good_updates"], b["loss_scale_good_updates"])
+            self.assertEqual(latest_checkpoint(root / "resume").name, "ckpt-3.pt")
+            self.assertEqual(sorted(p.name for p in (root / "resume/checkpoints").glob("*.pt")),
+                             ["ckpt-2.pt", "ckpt-3.pt"])
+            with patch("mind_news_metadata.prediction.make_model", side_effect=model_factory), patch(
+                    "mind_news_metadata.prediction.locked_artifacts", return_value=identity):
+                restored, _, path, _ = load_run(root / "resume", root, device=DEVICES[0])
+            self.assertEqual(path, resumed["latest_checkpoint"])
+            torch.testing.assert_close({k: v.cpu() for k, v in restored.state_dict().items()}, b["model"])
 
 
 if __name__ == "__main__":

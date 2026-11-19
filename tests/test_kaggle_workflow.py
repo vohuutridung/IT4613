@@ -67,13 +67,12 @@ class RunnerCliTest(unittest.TestCase):
             checkpoints = run / "checkpoints"
             checkpoints.mkdir(parents=True)
             state = checkpoints / "checkpoint"
-            state.write_text('model_checkpoint_path: "ckpt-42"\n'
-                             'all_model_checkpoint_paths: "ckpt-41"\n', encoding="utf-8")
+            state.write_text("ckpt-42.pt\n", encoding="utf-8")
             (run / "run_config.json").write_text("{}", encoding="utf-8")
             (run / "training_progress.json").write_text('{"full_epoch": true}', encoding="utf-8")
-            (checkpoints / "ckpt-42.index").touch()
-            shard = checkpoints / "ckpt-42.data-00000-of-00001"
-            shard.touch()
+            weights = checkpoints / "ckpt-42.pt"
+            weights.touch()
+            (checkpoints / "ckpt-41.pt").touch()
             hub = SimpleNamespace(HfApi=Mock(), hf_hub_download=Mock(return_value=str(state)),
                                   snapshot_download=Mock(return_value=str(snapshot)))
             hub.HfApi.return_value.model_info.return_value.sha = "a" * 40
@@ -91,12 +90,12 @@ class RunnerCliTest(unittest.TestCase):
                 self.assertEqual(download["revision"], "a" * 40)
                 self.assertEqual(download["allow_patterns"], [
                     folder + "/run_config.json", folder + "/training_progress.json",
-                    folder + "/checkpoints/ckpt-42.index", folder + "/checkpoints/ckpt-42.data-*"])
+                    folder + "/checkpoints/ckpt-42.pt"])
                 module.assert_called_once()
                 prediction = module.call_args.args
                 self.assertEqual(prediction[prediction.index("--run-dir") + 1], run)
-                shard.rename(checkpoints / "ckpt-42.data-00000-of-00002")
-                with self.assertRaisesRegex(FileNotFoundError, "missing checkpoint files"):
+                weights.unlink()
+                with self.assertRaisesRegex(FileNotFoundError, "missing checkpoint file"):
                     runner.execute()
 
     def test_submit_uses_inference_batch_and_existing_run(self):
@@ -156,14 +155,14 @@ class RunnerCliTest(unittest.TestCase):
         self.assertIn('"--checkpoint-every", "250"', default.stdout)
         override = subprocess.run(command + ["--effective-batch", "2048", "--batch-size", "128",
             "--max-impressions", "1000", "--max-updates", "5",
-            "--precision", "float32", "--prefetch-batches", "0", "--train-step-xla"],
+            "--precision", "float32", "--prefetch-batches", "0", "--train-step-compile"],
             cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(override.returncode, 0, override.stderr)
         self.assertIn('"--effective-batch", "2048"', override.stdout)
         self.assertIn('"--batch-size", "128"', override.stdout)
         self.assertIn('"--max-impressions", "1000"', override.stdout)
         self.assertIn('"--max-updates", "5"', override.stdout)
-        self.assertIn('"--train-step-xla"', override.stdout)
+        self.assertIn('"--train-step-compile"', override.stdout)
         invalid = subprocess.run(command + ["--effective-batch", "1000"],
                                  cwd=ROOT, capture_output=True, text=True)
         self.assertNotEqual(invalid.returncode, 0)

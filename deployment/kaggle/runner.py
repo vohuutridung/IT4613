@@ -7,7 +7,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +18,10 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from mind_news_metadata.checkpoint import CHECKPOINT_STATE, latest_checkpoint, read_checkpoint_name
+
+
 CANONICAL_PREPARED = ROOT / "artifacts" / "mind_large_prepared"
 TOKENIZER_MANIFEST = ROOT / "tokenizer_artifact.json"
 GLOVE_REPOSITORY = "https://github.com/stanfordnlp/GloVe.git"
@@ -383,11 +386,10 @@ class Runner:
             self.log.emit("SKIP", stage="gpu-preflight", reason="--allow-cpu")
             return
         probe = (
-            "import json,tensorflow as tf; "
-            "g=tf.config.list_physical_devices('GPU'); "
+            "import json,torch; "
+            "g=[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]; "
             "assert len(g)>=" + str(required) + ", 'Not enough visible GPUs: '+str(g); "
-            "[tf.config.experimental.set_memory_growth(x,True) for x in g]; "
-            "print(json.dumps({'tensorflow':tf.__version__,'gpus':[x.name for x in g]}))"
+            "print(json.dumps({'pytorch':torch.__version__,'cuda':torch.version.cuda,'gpus':g}))"
         )
         self.command([self.python, "-c", probe], stage="gpu-preflight")
 
@@ -399,6 +401,8 @@ class Runner:
         if progress_path.is_file():
             progress = json.loads(progress_path.read_text(encoding="utf-8"))
             if progress.get("full_epoch"):
+                if latest_checkpoint(run_dir) is None:
+                    raise ValueError("completed run has no PyTorch checkpoint: {}".format(run_dir))
                 self.log.emit("SKIP", stage="train", partition=partition,
                               reason="full epoch already complete")
                 return run_dir
@@ -427,8 +431,8 @@ class Runner:
                 self._copy_resume(source, run_dir)
             resume = True
         elif run_dir.is_dir():
-            if not (run_dir / "checkpoints/checkpoint").is_file():
-                raise ValueError("existing partial run has no checkpoint manager state")
+            if latest_checkpoint(run_dir) is None:
+                raise ValueError("existing partial run has no PyTorch checkpoint")
             resume = True
         command = [
             self.python, "-m", "mind_news_metadata.full_pipeline", "train",
@@ -441,7 +445,7 @@ class Runner:
             "--precision", self.args.precision,
             "--prefetch-batches", self.args.prefetch_batches,
             "--checkpoint-every", self.args.checkpoint_every,
-            "--train-step-xla" if self.args.train_step_xla else "--no-train-step-xla",
+            "--train-step-compile" if self.args.train_step_compile else "--no-train-step-compile",
             "--output-dir", run_dir,
         ]
         if self.args.allow_cpu:
@@ -510,33 +514,21 @@ class Runner:
             download = {"repo_id": self.args.hf_repo, "repo_type": "model",
                         "revision": revision, "cache_dir": cache_dir, "token": token}
             checkpoint_dir = folder / "checkpoints"
-            state_name = (checkpoint_dir / "checkpoint").as_posix()
-            state = Path(hf_hub_download(filename=state_name, **download))
-            match = re.search(r'^model_checkpoint_path: "(ckpt-\d+)"$',
-                              state.read_text(encoding="utf-8"), re.MULTILINE)
-            if not match:
-                raise ValueError("Hugging Face checkpoint state must point to a relative ckpt-N")
-            prefix = checkpoint_dir / match[1]
+            state_name = (checkpoint_dir / CHECKPOINT_STATE).as_posix()
+            state = hf_hub_download(filename=state_name, **download)
+            checkpoint = checkpoint_dir / read_checkpoint_name(state)
             metadata = ["run_config.json", "training_progress.json"]
             snapshot = Path(snapshot_download(
-                allow_patterns=[*(str(folder / name) for name in metadata),
-                                str(prefix) + ".index", str(prefix) + ".data-*"],
+                allow_patterns=[*(str(folder / name) for name in metadata), str(checkpoint)],
                 **download))
             run_dir = snapshot / folder
             missing = [name for name in metadata if not (run_dir / name).is_file()]
             if missing:
                 raise FileNotFoundError("Hugging Face run is missing: {}".format(", ".join(missing)))
-            checkpoint = snapshot / prefix
-            shards = sorted(path.name for path in
-                            checkpoint.parent.glob(checkpoint.name + ".data-*") if path.is_file())
-            expected = ["{}.data-{:05d}-of-{:05d}".format(checkpoint.name, i, len(shards))
-                        for i in range(len(shards))]
-            if (not (snapshot / state_name).is_file()
-                    or not checkpoint.with_suffix(".index").is_file()
-                    or not shards or shards != expected):
-                raise FileNotFoundError("Hugging Face run is missing checkpoint files: {}".format(prefix))
+            if latest_checkpoint(run_dir) != snapshot / checkpoint:
+                raise ValueError("Hugging Face run has inconsistent checkpoint state")
             self.log.emit("HF_MODEL_READY", repo=self.args.hf_repo, folder=str(folder),
-                          revision=revision, checkpoint=str(prefix))
+                          revision=revision, checkpoint=str(checkpoint))
             return run_dir
 
     def submit(self, run_dirs, ensemble=False):
@@ -587,11 +579,12 @@ class Runner:
             raise ValueError("refusing to upload a partial run without --allow-partial")
         required = ["run_config.json", "partition_counts.json", "training_progress.json"]
         files = [run_dir / name for name in required]
-        files += sorted((run_dir / "checkpoints").glob("*"))
+        checkpoint = latest_checkpoint(run_dir)
+        if checkpoint is None or any(not path.is_file() for path in files):
+            raise ValueError("run metadata or PyTorch checkpoint is incomplete")
+        files += [checkpoint.parent / CHECKPOINT_STATE]
+        files += sorted(checkpoint.parent.glob("ckpt-*.pt"))
         files += sorted(run_dir.glob("*.log"))
-        if any(not path.is_file() for path in files[:len(required)]) or not any(
-                path.suffix == ".index" for path in files):
-            raise ValueError("run metadata or checkpoint shards are incomplete")
         if self.args.dry_run:
             self.log.emit("DRY_RUN", stage="push-model", repo=self.args.hf_repo,
                           folder=str(folder), files=[str(path) for path in files])
@@ -689,8 +682,9 @@ def parser():
     ap.add_argument("--precision", choices=("float32", "mixed_float16"), default=TRAINING_CONFIG["precision"])
     ap.add_argument("--prefetch-batches", type=int, default=EXECUTION_CONFIG.prefetch_batches)
     ap.add_argument("--checkpoint-every", type=int, default=EXECUTION_CONFIG.checkpoint_every_updates)
-    ap.add_argument("--train-step-xla", action=argparse.BooleanOptionalAction,
-                    default=TRAINING_CONFIG["train_step_xla"])
+    ap.add_argument("--train-step-compile", action=argparse.BooleanOptionalAction,
+                    default=TRAINING_CONFIG["train_step_compile"],
+                    help="use torch.compile for the MLP during training")
     ap.add_argument("--seed", type=int, default=20261110)
     ap.add_argument("--max-updates", type=int)
     ap.add_argument("--max-impressions", type=int,

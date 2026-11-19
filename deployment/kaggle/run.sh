@@ -46,7 +46,16 @@ if [[ -z "$UV" ]]; then
 fi
 
 REQUIREMENTS="$ROOT/deployment/kaggle/requirements.txt"
-VENV="$WORK_ROOT/python311-tf215"
+VENV="$WORK_ROOT/python311-pytorch29"
+TORCH_INDEX=""
+if [[ "$MODE" != "prepare" && "$(uname -s)" == "Linux" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    TORCH_INDEX="cu126"
+  else
+    TORCH_INDEX="cpu"
+  fi
+  VENV="$VENV-$TORCH_INDEX"
+fi
 if [[ "$MODE" == "prepare" ]]; then
   REQUIREMENTS="$ROOT/deployment/kaggle/requirements-prepare.txt"
   VENV="$WORK_ROOT/python311-prepare"
@@ -63,8 +72,13 @@ fi
 REQ_HASH="$(shasum -a 256 "$REQUIREMENTS" | awk '{print $1}')"
 REQ_MARKER="$VENV/.mind15-requirements-$REQ_HASH"
 if [[ ! -f "$REQ_MARKER" ]]; then
-  "$UV" pip install --python "$PYTHON" \
-    -r "$REQUIREMENTS"
+  if [[ -n "$TORCH_INDEX" ]]; then
+    # Resolve torch from its own index, then install the shared requirements.
+    "$UV" pip install --python "$PYTHON" \
+      --index-url "https://download.pytorch.org/whl/$TORCH_INDEX" \
+      "$(awk '/^torch==/ {print; exit}' "$REQUIREMENTS")"
+  fi
+  "$UV" pip install --python "$PYTHON" -r "$REQUIREMENTS"
   rm -f "$VENV"/.mind15-requirements-*
   touch "$REQ_MARKER"
   if [[ "$MODE" == "prepare" ]]; then
@@ -76,8 +90,6 @@ export PYTHONPATH="$ROOT"
 export PYTHONUNBUFFERED=1
 # Respect an explicit device restriction; otherwise expose both Kaggle T4s.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
-export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
-export TF_FORCE_GPU_ALLOW_GROWTH="${TF_FORCE_GPU_ALLOW_GROWTH:-true}"
 
 LOG="$WORK_ROOT/pipeline.log"
 set +e

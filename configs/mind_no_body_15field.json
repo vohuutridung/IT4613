@@ -63,8 +63,9 @@
     "dense_bias_initializer": "zeros",
     "output": "single logit; probability sigmoid(logit)",
     "loss": "mean sigmoid cross entropy from logits over labeled candidates",
-    "optimizer": "tf.keras.optimizers.Adam from the TensorFlow/Keras 2.15 compatibility environment; reimplementation, not verified as upstream bert-adam",
-    "optimizer_algorithm_note": "Keras Adam bias-corrected moment update; exact upstream bert-adam bias correction, epsilon placement, clipping, weight decay, and sparse-gradient semantics unresolved",
+    "framework": "pytorch",
+    "optimizer": "torch.optim.Adam",
+    "optimizer_algorithm_note": "PyTorch Adam with FP32 parameters and optimizer state. Sparse embedding gradients are accumulated and merged before the dense Adam update.",
     "learning_rate_peak": 0.001,
     "learning_rate_min": 1e-06,
     "warmup_fraction": 0.1,
@@ -73,13 +74,8 @@
     "epsilon": 1e-07,
     "weight_decay": 0.0,
     "amsgrad": false,
-    "clipnorm": null,
-    "clipvalue": null,
-    "global_clipnorm": null,
-    "use_ema": false,
-    "jit_compile": false,
     "schedule": "ceil(0.1*updates) linear warmup then linear decay to min over one epoch",
-    "schedule_step_convention": "zero-based update counter; assign learning_rate_at(update) before apply_gradients, increment update after the optimizer step",
+    "schedule_step_convention": "zero-based update counter; assign learning_rate_at(update) before optimizer.step, increment update after the optimizer step",
     "ranking_metrics_k": [
       5,
       10
@@ -111,13 +107,13 @@
       "attention_and_din": true,
       "mlp": true
     },
-    "initializer": "existing encoder initializers and Keras Dense GlorotUniform/zero bias defaults; nonhistorical numerical equivalence not claimed",
+    "initializer": "Glorot uniform weights and zero linear biases, with prepared matrices used for word/entity initialization",
     "tie_break": "candidate_position ascending",
-    "resume": "strict TensorFlow restore includes model, Adam slots, optimizer iterations, update counter, examples_seen cursor, and schedule index; counters must align; saved optimizer LR must match the prior schedule step within rtol=1e-6/atol=1e-12; cursor must equal min(update*effective_batch_size, selected_candidates); deterministic sampler is replayed from its locked seed; run config and actual database content fingerprint must match",
+    "resume": "strict PyTorch restore includes model and Adam state dictionaries, AMP loss scale, update counter, examples_seen cursor, and schedule index; counters must align; saved optimizer LR must match the prior schedule step within rtol=1e-6/atol=1e-12; cursor must equal min(update*effective_batch_size, selected_candidates); deterministic sampler is replayed from its locked seed; run config and actual database content fingerprint must match",
     "split_policy": "train-only partition training; dev full unsampled; test labels prohibited",
     "replicas": 2,
     "precision": "mixed_float16",
-    "train_step_xla": false
+    "train_step_compile": false
   },
   "execution": {
     "default_candidate_batch_size": 32,
@@ -135,7 +131,7 @@
     "Word vectors are the local title+abstract MIND GloVe reimplementation; entity vectors are locally derived from the supplied MIND artifact. Their provenance is stored beside the matrices.",
     "Query-free masked attention for his_id is a disclosed choice; the exact private PoolingWrapper('att') query use remains unverified.",
     "Private gezi/melt/husky components are not replaced by similarly named packages. Attention/DIN/pooling implementations are independent reimplementations.",
-    "Keras Adam remains the active optimizer implementation. The source shell names bert-adam, but the exact runtime dispatch/dependency binding is not proven; no equivalence claim is made.",
+    "PyTorch Adam is the active optimizer on this branch. The source shell names bert-adam, whose exact runtime dispatch and dependency binding are unresolved.",
     "Effective batch defaults to 1024, with per-GPU microbatch 64 and two replicas; accumulation is derived as effective_batch/(microbatch*replicas). Execution flags are configurable."
   ],
   "shared_architecture": {

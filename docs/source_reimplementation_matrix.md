@@ -1,5 +1,7 @@
 # Source and reimplementation matrix
 
+This matrix records the TensorFlow implementation from the `main` branch and its comparison with upstream. The `pytorch` branch uses the same 15-field data contract and updates the training runtime, optimizer and checkpoint format. See `README.md` for the PyTorch entry points.
+
 ## Scope and evidence key
 
 The active implementation is `mind_no_body_15field`: a deliberate 15-field variant. The pinned source uses 17 fields, including `cur_body` and `his_body`; this project does not claim to reproduce that full model or its reported competition result. The source checkout is `upstream-mind/` at `f632bdf7b1136dff142835f9fe69c8ce5f8c166d`, as recorded by `source_lock.json` and `source_manifest.json`. Neither file was edited in this review.
