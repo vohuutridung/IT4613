@@ -6,10 +6,11 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
-from deployment.kaggle.runner import Runner
+from deployment.kaggle.runner import Runner, parser
 from mind_data_pipeline.compact_preprocess import build_behaviors
 from mind_data_pipeline.preprocess import init_db, pack_ids
 from mind_news_metadata.batch_data import NewsBatchStore
@@ -57,6 +58,47 @@ class SubmissionFormatTest(unittest.TestCase):
 
 
 class RunnerCliTest(unittest.TestCase):
+    def test_submit_downloads_current_checkpoint_from_pinned_hf_revision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary).resolve()
+            folder = "experiments/partition-0"
+            snapshot = work_root / "snapshot"
+            run = snapshot / folder
+            checkpoints = run / "checkpoints"
+            checkpoints.mkdir(parents=True)
+            state = checkpoints / "checkpoint"
+            state.write_text('model_checkpoint_path: "ckpt-42"\n'
+                             'all_model_checkpoint_paths: "ckpt-41"\n', encoding="utf-8")
+            (run / "run_config.json").write_text("{}", encoding="utf-8")
+            (run / "training_progress.json").write_text('{"full_epoch": true}', encoding="utf-8")
+            (checkpoints / "ckpt-42.index").touch()
+            shard = checkpoints / "ckpt-42.data-00000-of-00001"
+            shard.touch()
+            hub = SimpleNamespace(HfApi=Mock(), hf_hub_download=Mock(return_value=str(state)),
+                                  snapshot_download=Mock(return_value=str(snapshot)))
+            hub.HfApi.return_value.model_info.return_value.sha = "a" * 40
+            args = parser().parse_args(["--mode", "submit", "--work-root", str(work_root),
+                                        "--hf-folder", folder, "--hf-revision", "release",
+                                        "--predict-max-candidates", "100"])
+            runner = Runner(args)
+            with patch.dict(sys.modules, {"huggingface_hub": hub}), \
+                    patch.object(runner, "use_prepared"), patch.object(runner, "module") as module:
+                runner.execute()
+                hub.HfApi.return_value.model_info.assert_called_once_with(args.hf_repo, revision="release")
+                download = hub.snapshot_download.call_args.kwargs
+                self.assertEqual(download["cache_dir"], work_root / "hf-cache")
+                self.assertEqual(download["revision"], hub.hf_hub_download.call_args.kwargs["revision"])
+                self.assertEqual(download["revision"], "a" * 40)
+                self.assertEqual(download["allow_patterns"], [
+                    folder + "/run_config.json", folder + "/training_progress.json",
+                    folder + "/checkpoints/ckpt-42.index", folder + "/checkpoints/ckpt-42.data-*"])
+                module.assert_called_once()
+                prediction = module.call_args.args
+                self.assertEqual(prediction[prediction.index("--run-dir") + 1], run)
+                shard.rename(checkpoints / "ckpt-42.data-00000-of-00002")
+                with self.assertRaisesRegex(FileNotFoundError, "missing checkpoint files"):
+                    runner.execute()
+
     def test_submit_uses_inference_batch_and_existing_run(self):
         with tempfile.TemporaryDirectory() as temporary:
             work_root = Path(temporary)

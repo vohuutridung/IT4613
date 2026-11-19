@@ -157,6 +157,25 @@ bash deployment/kaggle/run.sh \
 
 Chỉ checkpoint và run metadata được upload.
 
+Để predict trên Kaggle từ run đã upload, truyền `--hf-folder` thay cho
+`--run-dir`:
+
+```bash
+bash deployment/kaggle/run.sh \
+  --mode submit \
+  --prepared-root /kaggle/input/CHANGE_ME_PREPARED/prepared \
+  --partition 0 \
+  --hf-repo vohuutridung/IT4613-HGY \
+  --hf-folder experiments/partition-0 \
+  --work-root /kaggle/working/mind15
+```
+
+Lệnh tải metadata và checkpoint mới nhất của run vào `<work-root>/hf-cache`,
+sau đó predict và tạo ZIP như khi dùng run local. Vẫn cần prepared bundle
+tương ứng với checkpoint. Repo private cần `HF_TOKEN` có quyền đọc. Dùng
+`--hf-revision` để chọn branch, tag hoặc commit (mặc định `main`). Thêm
+`--predict-max-candidates 1000000` nếu chỉ muốn chạy smoke test.
+
 ## Mode và tham số
 
 Các mode:
@@ -194,7 +213,8 @@ Tham số chính:
 - `--resume-run`: checkpoint run cần resume.
 - `--run-dir`: model run dùng để submit/upload.
 - `--output`: đường dẫn submission ZIP.
-- `--hf-repo`, `--hf-folder`: đích upload Hugging Face.
+- `--hf-repo`, `--hf-folder`: đích upload với `push-model` hoặc nguồn checkpoint với `submit`.
+- `--hf-revision`: phiên bản trên Hugging Face dùng khi predict với `submit`.
 - `--allow-partial`: cho phép dùng partial run.
 - `--allow-cpu`: không bắt buộc GPU.
 - `--dry-run`: chỉ in kế hoạch.

@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -458,14 +459,15 @@ class Runner:
 
     def _prediction(self, run_dir: Path, index: int):
         progress_path = run_dir / "training_progress.json"
-        if not progress_path.is_file():
-            raise FileNotFoundError("run has no training_progress.json: {}".format(run_dir))
-        progress = json.loads(progress_path.read_text(encoding="utf-8"))
-        if (not progress.get("full_epoch") and not self.args.allow_partial
-                and self.args.predict_max_candidates is None):
-            raise ValueError(
-                "refusing test submission from partial run {}; use --allow-partial explicitly".format(
-                    run_dir))
+        if not (self.args.dry_run and self.args.hf_folder):
+            if not progress_path.is_file():
+                raise FileNotFoundError("run has no training_progress.json: {}".format(run_dir))
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            if (not progress.get("full_epoch") and not self.args.allow_partial
+                    and self.args.predict_max_candidates is None):
+                raise ValueError(
+                    "refusing test submission from partial run {}; use --allow-partial explicitly".format(
+                        run_dir))
         membership = CANONICAL_PREPARED / "membership/train_did_membership.npy"
         suffix = "test-smoke" if self.args.predict_max_candidates is not None else "test"
         output = self.work_root / "predictions" / (
@@ -484,8 +486,63 @@ class Runner:
                     stage="predict-test-model-{}".format(index))
         return output
 
+    def _download_model(self):
+        folder = PurePosixPath(self.args.hf_folder)
+        if (folder.is_absolute() or ".." in folder.parts or str(folder) == "."
+                or any(char in str(folder) for char in "*?[]")):
+            raise ValueError("--hf-folder must be a safe relative repository path")
+        cache_dir = self.work_root / "hf-cache"
+        source = {"repo": self.args.hf_repo, "folder": str(folder),
+                  "revision": self.args.hf_revision}
+        if self.args.dry_run:
+            self.log.emit("DRY_RUN", stage="download-hf-model", **source)
+            return cache_dir / "<snapshot>" / folder
+
+        from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+
+        token = os.environ.get("HF_TOKEN")
+        with self.log.stage("download-hf-model", **source):
+            # Use one commit for checkpoint state, weights and run metadata.
+            revision = HfApi(token=token).model_info(
+                self.args.hf_repo, revision=self.args.hf_revision).sha
+            if not revision:
+                raise ValueError("could not resolve the Hugging Face model revision")
+            download = {"repo_id": self.args.hf_repo, "repo_type": "model",
+                        "revision": revision, "cache_dir": cache_dir, "token": token}
+            checkpoint_dir = folder / "checkpoints"
+            state_name = (checkpoint_dir / "checkpoint").as_posix()
+            state = Path(hf_hub_download(filename=state_name, **download))
+            match = re.search(r'^model_checkpoint_path: "(ckpt-\d+)"$',
+                              state.read_text(encoding="utf-8"), re.MULTILINE)
+            if not match:
+                raise ValueError("Hugging Face checkpoint state must point to a relative ckpt-N")
+            prefix = checkpoint_dir / match[1]
+            metadata = ["run_config.json", "training_progress.json"]
+            snapshot = Path(snapshot_download(
+                allow_patterns=[*(str(folder / name) for name in metadata),
+                                str(prefix) + ".index", str(prefix) + ".data-*"],
+                **download))
+            run_dir = snapshot / folder
+            missing = [name for name in metadata if not (run_dir / name).is_file()]
+            if missing:
+                raise FileNotFoundError("Hugging Face run is missing: {}".format(", ".join(missing)))
+            checkpoint = snapshot / prefix
+            shards = sorted(path.name for path in
+                            checkpoint.parent.glob(checkpoint.name + ".data-*") if path.is_file())
+            expected = ["{}.data-{:05d}-of-{:05d}".format(checkpoint.name, i, len(shards))
+                        for i in range(len(shards))]
+            if (not (snapshot / state_name).is_file()
+                    or not checkpoint.with_suffix(".index").is_file()
+                    or not shards or shards != expected):
+                raise FileNotFoundError("Hugging Face run is missing checkpoint files: {}".format(prefix))
+            self.log.emit("HF_MODEL_READY", repo=self.args.hf_repo, folder=str(folder),
+                          revision=revision, checkpoint=str(prefix))
+            return run_dir
+
     def submit(self, run_dirs, ensemble=False):
         self.use_prepared()
+        if self.args.mode == "submit" and self.args.hf_folder:
+            run_dirs = [self._download_model()]
         if not run_dirs:
             if ensemble:
                 run_dirs = [self.work_root / "recommendation_runs" / ("partition-{}".format(i))
@@ -644,7 +701,10 @@ def parser():
     ap.add_argument("--run-dir", action="append", default=[])
     ap.add_argument("--output")
     ap.add_argument("--hf-repo", default=DEFAULT_HF_REPO)
-    ap.add_argument("--hf-folder")
+    ap.add_argument("--hf-folder",
+                    help="repository folder to upload to (push-model) or predict from (submit)")
+    ap.add_argument("--hf-revision", default="main",
+                    help="Hugging Face branch, tag or commit to predict from (default: main)")
     ap.add_argument("--allow-partial", action="store_true")
     ap.add_argument("--allow-cpu", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
@@ -654,6 +714,15 @@ def parser():
 def main():
     ap = parser()
     args = ap.parse_args()
+    if args.hf_folder is not None and args.mode not in ("submit", "push-model"):
+        ap.error("--hf-folder is only supported with --mode submit or push-model")
+    if args.mode == "submit" and args.hf_folder is not None:
+        if not args.hf_folder.strip():
+            ap.error("--hf-folder cannot be empty")
+        if args.run_dir:
+            ap.error("choose either --hf-folder or --run-dir for --mode submit")
+    if args.hf_revision != "main" and not (args.mode == "submit" and args.hf_folder):
+        ap.error("--hf-revision requires --mode submit with --hf-folder")
     if args.predict_batch_size < 1:
         ap.error("--predict-batch-size must be positive")
     if args.predict_replicas < 1:
