@@ -58,22 +58,29 @@ class SubmissionFormatTest(unittest.TestCase):
 
 
 class RunnerCliTest(unittest.TestCase):
+    def _hf_run_fixture(self, run, update):
+        checkpoints = run / "checkpoints"
+        checkpoints.mkdir(parents=True)
+        state = checkpoints / "checkpoint"
+        state.write_text(
+            'model_checkpoint_path: "ckpt-{}"\n'
+            'all_model_checkpoint_paths: "ckpt-{}"\n'.format(update, update - 1),
+            encoding="utf-8")
+        (run / "run_config.json").write_text("{}", encoding="utf-8")
+        (run / "training_progress.json").write_text('{"full_epoch": true}', encoding="utf-8")
+        (checkpoints / "ckpt-{}.index".format(update)).touch()
+        (checkpoints / "ckpt-{}.data-00000-of-00001".format(update)).touch()
+        return state
+
     def test_submit_downloads_current_checkpoint_from_pinned_hf_revision(self):
         with tempfile.TemporaryDirectory() as temporary:
             work_root = Path(temporary).resolve()
             folder = "experiments/partition-0"
             snapshot = work_root / "snapshot"
             run = snapshot / folder
-            checkpoints = run / "checkpoints"
-            checkpoints.mkdir(parents=True)
-            state = checkpoints / "checkpoint"
-            state.write_text('model_checkpoint_path: "ckpt-42"\n'
-                             'all_model_checkpoint_paths: "ckpt-41"\n', encoding="utf-8")
-            (run / "run_config.json").write_text("{}", encoding="utf-8")
-            (run / "training_progress.json").write_text('{"full_epoch": true}', encoding="utf-8")
-            (checkpoints / "ckpt-42.index").touch()
+            state = self._hf_run_fixture(run, 42)
+            checkpoints = state.parent
             shard = checkpoints / "ckpt-42.data-00000-of-00001"
-            shard.touch()
             hub = SimpleNamespace(HfApi=Mock(), hf_hub_download=Mock(return_value=str(state)),
                                   snapshot_download=Mock(return_value=str(snapshot)))
             hub.HfApi.return_value.model_info.return_value.sha = "a" * 40
@@ -98,6 +105,55 @@ class RunnerCliTest(unittest.TestCase):
                 shard.rename(checkpoints / "ckpt-42.data-00000-of-00002")
                 with self.assertRaisesRegex(FileNotFoundError, "missing checkpoint files"):
                     runner.execute()
+
+    def test_ensemble_submit_downloads_all_partitions_before_prediction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary).resolve()
+            snapshot = work_root / "snapshot"
+            folders = ["tf_2011/partition-{}".format(i) for i in range(5)]
+            states = [self._hf_run_fixture(snapshot / folder, i + 42)
+                      for i, folder in enumerate(folders)]
+            hub = SimpleNamespace(
+                HfApi=Mock(),
+                hf_hub_download=Mock(side_effect=lambda filename, **_: str(snapshot / filename)),
+                snapshot_download=Mock(return_value=str(snapshot)),
+            )
+            revision = "b" * 40
+            hub.HfApi.return_value.model_info.return_value.sha = revision
+            args = parser().parse_args(["--mode", "ensemble-submit", "--work-root", str(work_root),
+                                        "--hf-folder", "tf_2011/", "--hf-revision", "release"])
+            runner = Runner(args)
+            with patch.dict(sys.modules, {"huggingface_hub": hub}), \
+                    patch.object(runner, "use_prepared"), patch.object(runner, "module") as worker:
+                runner.execute()
+                hub.HfApi.return_value.model_info.assert_called_once_with(args.hf_repo, revision="release")
+                hub.snapshot_download.assert_called_once()
+                download = hub.snapshot_download.call_args.kwargs
+                self.assertEqual(download["revision"], revision)
+                self.assertEqual(
+                    [(call.kwargs["filename"], call.kwargs["revision"])
+                     for call in hub.hf_hub_download.call_args_list],
+                    [(state.relative_to(snapshot).as_posix(), revision) for state in states])
+                self.assertEqual(download["allow_patterns"], [
+                    f"{folder}/{name}" for i, folder in enumerate(folders)
+                    for name in ("run_config.json", "training_progress.json",
+                                 f"checkpoints/ckpt-{i + 42}.index",
+                                 f"checkpoints/ckpt-{i + 42}.data-*")])
+                predictions = [call.args for call in worker.call_args_list[:-1]]
+                self.assertTrue(all(command[1] == "predict" for command in predictions))
+                self.assertEqual([command[command.index("--run-dir") + 1] for command in predictions],
+                                 [snapshot / folder for folder in folders])
+                submission = worker.call_args.args
+                self.assertEqual(submission[1:3], ("submit", "--inputs"))
+                self.assertEqual(list(submission[3:8]), [
+                    work_root / "predictions" / f"model-{i}-test.csv.gz" for i in range(5)])
+                self.assertEqual(submission[-1], work_root / "submissions/ensemble-submission.zip")
+
+                worker.reset_mock()
+                states[-1].unlink()
+                with self.assertRaisesRegex(FileNotFoundError, "partition-4/checkpoints/checkpoint"):
+                    runner.execute()
+                worker.assert_not_called()
 
     def test_submit_uses_inference_batch_and_existing_run(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -24,6 +24,8 @@ TOKENIZER_MANIFEST = ROOT / "tokenizer_artifact.json"
 GLOVE_REPOSITORY = "https://github.com/stanfordnlp/GloVe.git"
 GLOVE_COMMIT = "52f7dbc512be3f72e9c11e7cbb19dfdfa4651e9c"
 DEFAULT_HF_REPO = "vohuutridung/IT4613-HGY"
+PARTITIONS = range(5)
+SUBMIT_MODES = ("submit", "ensemble-submit")
 DEFAULT_PREDICT_BATCH_SIZE = 128
 SPLITS = ("train", "dev", "test")
 
@@ -486,67 +488,78 @@ class Runner:
                     stage="predict-test-model-{}".format(index))
         return output
 
-    def _download_model(self):
+    def _download_models(self, ensemble=False):
         folder = PurePosixPath(self.args.hf_folder)
         if (folder.is_absolute() or ".." in folder.parts or str(folder) == "."
                 or any(char in str(folder) for char in "*?[]")):
             raise ValueError("--hf-folder must be a safe relative repository path")
+        folders = [folder / "partition-{}".format(i) for i in PARTITIONS] if ensemble else [folder]
         cache_dir = self.work_root / "hf-cache"
         source = {"repo": self.args.hf_repo, "folder": str(folder),
                   "revision": self.args.hf_revision}
         if self.args.dry_run:
-            self.log.emit("DRY_RUN", stage="download-hf-model", **source)
-            return cache_dir / "<snapshot>" / folder
+            for run_folder in folders:
+                self.log.emit("DRY_RUN", stage="download-hf-model",
+                              **{**source, "folder": str(run_folder)})
+            return [cache_dir / "<snapshot>" / run_folder for run_folder in folders]
 
         from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
         token = os.environ.get("HF_TOKEN")
         with self.log.stage("download-hf-model", **source):
-            # Use one commit for checkpoint state, weights and run metadata.
+            # Resolve the branch or tag once for every partition and file.
             revision = HfApi(token=token).model_info(
                 self.args.hf_repo, revision=self.args.hf_revision).sha
             if not revision:
                 raise ValueError("could not resolve the Hugging Face model revision")
             download = {"repo_id": self.args.hf_repo, "repo_type": "model",
                         "revision": revision, "cache_dir": cache_dir, "token": token}
-            checkpoint_dir = folder / "checkpoints"
-            state_name = (checkpoint_dir / "checkpoint").as_posix()
-            state = Path(hf_hub_download(filename=state_name, **download))
-            match = re.search(r'^model_checkpoint_path: "(ckpt-\d+)"$',
-                              state.read_text(encoding="utf-8"), re.MULTILINE)
-            if not match:
-                raise ValueError("Hugging Face checkpoint state must point to a relative ckpt-N")
-            prefix = checkpoint_dir / match[1]
             metadata = ["run_config.json", "training_progress.json"]
-            snapshot = Path(snapshot_download(
-                allow_patterns=[*(str(folder / name) for name in metadata),
-                                str(prefix) + ".index", str(prefix) + ".data-*"],
-                **download))
-            run_dir = snapshot / folder
-            missing = [name for name in metadata if not (run_dir / name).is_file()]
-            if missing:
-                raise FileNotFoundError("Hugging Face run is missing: {}".format(", ".join(missing)))
-            checkpoint = snapshot / prefix
-            shards = sorted(path.name for path in
-                            checkpoint.parent.glob(checkpoint.name + ".data-*") if path.is_file())
-            expected = ["{}.data-{:05d}-of-{:05d}".format(checkpoint.name, i, len(shards))
-                        for i in range(len(shards))]
-            if (not (snapshot / state_name).is_file()
-                    or not checkpoint.with_suffix(".index").is_file()
-                    or not shards or shards != expected):
-                raise FileNotFoundError("Hugging Face run is missing checkpoint files: {}".format(prefix))
-            self.log.emit("HF_MODEL_READY", repo=self.args.hf_repo, folder=str(folder),
-                          revision=revision, checkpoint=str(prefix))
-            return run_dir
+            prefixes = {}
+            patterns = []
+            for run_folder in folders:
+                checkpoint_dir = run_folder / "checkpoints"
+                state_name = (checkpoint_dir / "checkpoint").as_posix()
+                state = Path(hf_hub_download(filename=state_name, **download))
+                match = re.search(r'^model_checkpoint_path: "(ckpt-\d+)"$',
+                                  state.read_text(encoding="utf-8"), re.MULTILINE)
+                if not match:
+                    raise ValueError(
+                        "{} must point to a relative ckpt-N".format(state_name))
+                prefix = checkpoint_dir / match[1]
+                prefixes[run_folder] = prefix
+                patterns.extend(str(run_folder / name) for name in metadata)
+                patterns.extend([str(prefix) + ".index", str(prefix) + ".data-*"])
+            snapshot = Path(snapshot_download(allow_patterns=patterns, **download))
+            run_dirs = []
+            for run_folder, prefix in prefixes.items():
+                run_dir = snapshot / run_folder
+                missing = [name for name in metadata if not (run_dir / name).is_file()]
+                if missing:
+                    raise FileNotFoundError(
+                        "Hugging Face run {} is missing: {}".format(run_folder, ", ".join(missing)))
+                checkpoint = snapshot / prefix
+                shards = sorted(path.name for path in
+                                checkpoint.parent.glob(checkpoint.name + ".data-*") if path.is_file())
+                expected = ["{}.data-{:05d}-of-{:05d}".format(checkpoint.name, i, len(shards))
+                            for i in range(len(shards))]
+                if (not (checkpoint.parent / "checkpoint").is_file()
+                        or not checkpoint.with_suffix(".index").is_file()
+                        or not shards or shards != expected):
+                    raise FileNotFoundError("Hugging Face run is missing checkpoint files: {}".format(prefix))
+                self.log.emit("HF_MODEL_READY", repo=self.args.hf_repo, folder=str(run_folder),
+                              revision=revision, checkpoint=str(prefix))
+                run_dirs.append(run_dir)
+            return run_dirs
 
     def submit(self, run_dirs, ensemble=False):
         self.use_prepared()
-        if self.args.mode == "submit" and self.args.hf_folder:
-            run_dirs = [self._download_model()]
+        if self.args.hf_folder:
+            run_dirs = self._download_models(ensemble=ensemble)
         if not run_dirs:
             if ensemble:
                 run_dirs = [self.work_root / "recommendation_runs" / ("partition-{}".format(i))
-                            for i in range(5)]
+                            for i in PARTITIONS]
             else:
                 run_dirs = [self.work_root / "recommendation_runs" / (
                     "partition-{}".format(self.args.partition))]
@@ -645,7 +658,7 @@ class Runner:
                 "--seed", self.args.seed, "--prefetch-batches", self.args.prefetch_batches,
                 "--checkpoint-every", self.args.checkpoint_every], stage="benchmark-training")
         elif mode == "train-ensemble":
-            for partition in range(5):
+            for partition in PARTITIONS:
                 self.train(partition)
         elif mode == "submit":
             self.submit([Path(path) for path in self.args.run_dir], ensemble=False)
@@ -674,7 +687,7 @@ def parser():
     ap.add_argument("--data-root")
     ap.add_argument("--prepared-root")
     ap.add_argument("--work-root", default=str(default_work))
-    ap.add_argument("--partition", type=int, default=0, choices=range(5))
+    ap.add_argument("--partition", type=int, default=0, choices=PARTITIONS)
     from mind_config import EXECUTION_CONFIG, TRAINING_CONFIG
     ap.add_argument("--effective-batch", type=int, default=TRAINING_CONFIG["effective_batch_size"])
     ap.add_argument("--batch-size", "--microbatch", dest="microbatch", type=int,
@@ -702,7 +715,7 @@ def parser():
     ap.add_argument("--output")
     ap.add_argument("--hf-repo", default=DEFAULT_HF_REPO)
     ap.add_argument("--hf-folder",
-                    help="repository folder to upload to (push-model) or predict from (submit)")
+                    help="Hugging Face run folder, or parent of partition-0..4 for ensemble-submit")
     ap.add_argument("--hf-revision", default="main",
                     help="Hugging Face branch, tag or commit to predict from (default: main)")
     ap.add_argument("--allow-partial", action="store_true")
@@ -714,15 +727,15 @@ def parser():
 def main():
     ap = parser()
     args = ap.parse_args()
-    if args.hf_folder is not None and args.mode not in ("submit", "push-model"):
-        ap.error("--hf-folder is only supported with --mode submit or push-model")
-    if args.mode == "submit" and args.hf_folder is not None:
+    if args.hf_folder is not None and args.mode not in (*SUBMIT_MODES, "push-model"):
+        ap.error("--hf-folder is only supported with --mode submit, ensemble-submit or push-model")
+    if args.mode in SUBMIT_MODES and args.hf_folder is not None:
         if not args.hf_folder.strip():
             ap.error("--hf-folder cannot be empty")
         if args.run_dir:
-            ap.error("choose either --hf-folder or --run-dir for --mode submit")
-    if args.hf_revision != "main" and not (args.mode == "submit" and args.hf_folder):
-        ap.error("--hf-revision requires --mode submit with --hf-folder")
+            ap.error("choose either --hf-folder or --run-dir for --mode {}".format(args.mode))
+    if args.hf_revision != "main" and not (args.mode in SUBMIT_MODES and args.hf_folder):
+        ap.error("--hf-revision requires --mode submit or ensemble-submit with --hf-folder")
     if args.predict_batch_size < 1:
         ap.error("--predict-batch-size must be positive")
     if args.predict_replicas < 1:

@@ -176,6 +176,23 @@ tương ứng với checkpoint. Repo private cần `HF_TOKEN` có quyền đọc
 `--hf-revision` để chọn branch, tag hoặc commit (mặc định `main`). Thêm
 `--predict-max-candidates 1000000` nếu chỉ muốn chạy smoke test.
 
+Để predict ensemble từ Hugging Face, truyền thư mục cha chứa đủ
+`partition-0` đến `partition-4`:
+
+```bash
+bash deployment/kaggle/run.sh \
+  --mode ensemble-submit \
+  --prepared-root /kaggle/input/CHANGE_ME_PREPARED/prepared \
+  --hf-repo vohuutridung/IT4613-HGY \
+  --hf-folder tf_2011/ \
+  --predict-batch-size 8192 \
+  --predict-replicas 2 \
+  --work-root /kaggle/working/mind15
+```
+
+Runner lấy checkpoint mới nhất của mỗi partition từ cùng một revision,
+predict lần lượt rồi gộp kết quả thành `submissions/ensemble-submission.zip`.
+
 ## Mode và tham số
 
 Các mode:
@@ -213,8 +230,8 @@ Tham số chính:
 - `--resume-run`: checkpoint run cần resume.
 - `--run-dir`: model run dùng để submit/upload.
 - `--output`: đường dẫn submission ZIP.
-- `--hf-repo`, `--hf-folder`: đích upload với `push-model` hoặc nguồn checkpoint với `submit`.
-- `--hf-revision`: phiên bản trên Hugging Face dùng khi predict với `submit`.
+- `--hf-repo`, `--hf-folder`: đích upload với `push-model`, thư mục một run với `submit`, hoặc thư mục cha của 5 run với `ensemble-submit`.
+- `--hf-revision`: branch, tag hoặc commit trên Hugging Face dùng với `submit` và `ensemble-submit`.
 - `--allow-partial`: cho phép dùng partial run.
 - `--allow-cpu`: không bắt buộc GPU.
 - `--dry-run`: chỉ in kế hoạch.
