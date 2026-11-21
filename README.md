@@ -1,5 +1,7 @@
 # MIND 15-field Recommendation
 
+Kaggle notebook running full pipeline (reproduce version, tf): https://www.kaggle.com/code/vhutrdng/it4613-pipeline
+
 Pipeline recommendation cho MIND-large, dùng 15 field title, abstract và
 metadata, không dùng body.
 
